@@ -1,0 +1,1 @@
+nvcc -I"C:\ProgramData\NVIDIA Corporation\CUDA Samples\v9.0\common\inc" cufftTest.cu -o cufftTest -lcufft
