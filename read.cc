@@ -51,17 +51,24 @@ double *generate_ma_coef(int n){
 
 int main(int argc, char **argv) {
 
-    int m, n;
     //cuDoubleComplex *iqhh, *iqvv;
     fftw_complex *iqhh, *iqvv;
+    double *powhh;
 
-    m = 1024; // cell
-    n = 512;  // sweep
+    const int m = 1024; // cell
+    const int n = 512;  // sweep
+
+    const int ma_count = 7;
+
+    const double k_rangeres = 30;
+    const double k_calib = 1941.05;
 
     //iqhh = new cuDoubleComplex[m*n];
     //iqvv = new cuDoubleComplex[m*n];
     iqhh = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m*n);
     iqvv = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m*n);
+
+    powhh = new double[(m/2)*n];
 
     double a, b, c, d;
 
@@ -69,14 +76,14 @@ int main(int argc, char **argv) {
     const double *hamming_coef = generate_hamming_coef(m, n);
 
     // Generate MA coefficients
-    double *ma_coef = generate_ma_coef(7);
+    double *ma_coef = generate_ma_coef(ma_count);
     fftw_complex *fft_ma = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
     fftw_plan fft_ma_plan = fftw_plan_dft_1d(n, fft_ma, fft_ma, FFTW_FORWARD, FFTW_ESTIMATE);
-    for (int j=0; j<7; j++) {
+    for (int j=0; j<ma_count; j++) {
         fft_ma[j][0] = ma_coef[j];
         fft_ma[j][1] = 0;
     }
-    for (int j=7; j<n; j++) {
+    for (int j=ma_count; j<n; j++) {
         fft_ma[j][0] = 0;
         fft_ma[j][1] = 0;
     }
@@ -172,7 +179,7 @@ int main(int argc, char **argv) {
     fftw_plan fft_pdop_plan;
     fft_pdop_plan = fftw_plan_dft_1d(n, pdophh, pdophh, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_plan ifft_conv_plan;
-    ifft_conv_plan = fftw_plan_dft_1d(n, pdophh, pdophh, FFTW_FORWARD, FFTW_ESTIMATE);
+    ifft_conv_plan = fftw_plan_dft_1d(n, multhh, multhh, FFTW_BACKWARD, FFTW_ESTIMATE);
     for (int i=0; i<m/2; i++) {
         for (int j=0; j<n; j++) {
             pdophh[j][0] = iqhh[i*n+j][0] * iqhh[i*n+j][0] + iqhh[i*n+j][1] * iqhh[i*n+j][1];
@@ -190,30 +197,46 @@ int main(int argc, char **argv) {
         }
         //cout << endl;
 
-        
+        fftw_execute(ifft_conv_plan);
+
+        for (int j=0; j<n; j++) {
+            powhh[i*n+j] = multhh[j][0];
+            //cout << powhh[i*n+j] << ",";
+        }
+        //cout << endl;
     }
     fftw_destroy_plan(ifft_conv_plan);
     fftw_destroy_plan(fft_pdop_plan);
     //fftw_free(fft_pdop_buffer);
 
+    // Reflectivity
+    double *zdb, *zdr;
+    zdb = new double[m/2];
+    zdr = new double[m/2];
+    for (int i=0; i<m/2; i++) {
+        for (int j=1; j<n; j++) {
+            powhh[i*n] += powhh[i*n+j];
+        }
+        //cout << powhh[i*n] << endl;
+        zdb[i] = 10 * log10(pow(i*k_rangeres, 2.0) * k_calib * powhh[i]);
+        //zdr[i] = 10 * (log10(powhh[i])-log10(powvv[i]));
+        //cout << zdb[i] << endl;
+    }
 
 
+    delete zdr;
+    delete zdb;
 
     fftw_free(multhh);
     fftw_free(pdophh);
     fftw_free(fft_ma);
 
-    //delete iqhh;
-    //delete iqvv;
-    fftw_free(iqhh);
-    fftw_free(iqvv);
+    delete powhh;
 
-/*
-    for (int i=0; i<m; i++) {
-        for (int j=0; j<n; j++) {
-            cout << "(" << iqhh[i*n+j].x << "," << iqhh[i*n+j].y << ") ";
-        }
-        cout << endl;
-    }
-*/
+    //delete iqvv;
+    //delete iqhh;
+    fftw_free(iqvv);
+    fftw_free(iqhh);
+
+    return 0;
 }
