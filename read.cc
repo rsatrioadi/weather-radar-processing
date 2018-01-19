@@ -116,13 +116,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // for (int i=0; i<m; i++) {
-    //     for (int j=0; j<n; j++) {
-    //         cout << "(" << iqvv[i*n+j][0] << "," << iqvv[i*n+j][1] << ") ";
-    //     }
-    //     cout << endl;
-    // }
-
     // apply Hamming coefficients
     for (int i=0; i<m; i++) {
         for (int j=0; j<n; j++) {
@@ -138,6 +131,19 @@ int main(int argc, char **argv) {
             iqvv[i*n+j][0] *= hamming_coef[i*n+j];
             iqvv[i*n+j][1] *= hamming_coef[i*n+j];
         }
+    }
+
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            cout << "(" << iqhh[i*n+j][0] << "," << iqhh[i*n+j][1] << ") ";
+        }
+        cout << endl;
+    }
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            cout << "(" << iqvv[i*n+j][0] << "," << iqvv[i*n+j][1] << ") ";
+        }
+        cout << endl;
     }
 
     // FFT range profile

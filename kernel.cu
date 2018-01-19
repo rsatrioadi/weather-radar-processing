@@ -1,55 +1,65 @@
 #include <math.h>
 #include <iostream>
 #include "cuda_runtime.h"
-#include "kernel.h"
 #include <stdlib.h>
 
 using namespace std;
 
-__global__ void matrixMultiplicationKernel(float* A, float* B, float* C, int N) {
+__global__ void __apply_hamming(cuDoubleComplex *a, double *b, int m, int n) {
 
-    int ROW = blockIdx.y*blockDim.y+threadIdx.y;
-    int COL = blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    float tmpSum = 0;
-
-    if (ROW < N && COL < N) {
-        // each thread computes one element of the block sub-matrix
-        for (int i = 0; i < N; i++) {
-            tmpSum += A[ROW * N + i] * B[i * N + COL];
-        }
-    }
-    C[ROW * N + COL] = tmpSum;
+    double real, imag;
+    real = a[i].x;
+    imag = a[i].y;
+    a[i] = make_cuDoubleComplex(b[i%(m*n)]*real, b[i%(m*n)]*imag);
 }
 
-void seq(float *s, float *s2, int n) {
+/*cuDoubleComplex *pcmul_gpu(cuDoubleComplex *a, double *b, int m, int n) {
 
-    // declare the number of blocks per grid and the number of threads per block
-    // use 1 to 512 threads per block
-    /*dim3 threadsPerBlock(n, n);
-    dim3 blocksPerGrid(1, 1);
-    if (N*N > 512){
-        threadsPerBlock.x = 512;
-        threadsPerBlock.y = 512;
-        blocksPerGrid.x = ceil(double(N)/double(threadsPerBlock.x));
-        blocksPerGrid.y = ceil(double(N)/double(threadsPerBlock.y));
-    }
+    // host
+    cuDoubleComplex *h_res;
+    // device
+    cuDoubleComplex *d_a;
+    double *d_b;
 
-    matrixMultiplicationKernel<<<blocksPerGrid,threadsPerBlock>>>(A, B, C, N);*/
-}
+    // struct timeval tb, te;
+    // unsigned long long bb, e;
 
-void matrixMultiplication(float *A, float *B, float *C, int N){
+    h_res = new cuDoubleComplex[2*m*n];
 
-    // declare the number of blocks per grid and the number of threads per block
-    // use 1 to 512 threads per block
-    dim3 threadsPerBlock(N, N);
-    dim3 blocksPerGrid(1, 1);
-    if (N*N > 512){
-        threadsPerBlock.x = 512;
-        threadsPerBlock.y = 512;
-        blocksPerGrid.x = ceil(double(N)/double(threadsPerBlock.x));
-        blocksPerGrid.y = ceil(double(N)/double(threadsPerBlock.y));
-    }
+    cudaMalloc(&d_a, 2*m*n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_b, m*n*sizeof(double));
 
-    matrixMultiplicationKernel<<<blocksPerGrid,threadsPerBlock>>>(A, B, C, N);
-}
+    // gettimeofday(&tb, NULL);
+
+    cudaMemcpy(d_a, a, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, b, m*n*sizeof(double), cudaMemcpyHostToDevice);
+
+    // gettimeofday(&te, NULL);
+    // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    // cout << "copy to device " << e-bb << endl;
+
+    // gettimeofday(&tb, NULL);
+    pcmul_kernel<<<2*m,n>>>(d_a, d_b, m, n);
+    // gettimeofday(&te, NULL);
+    // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    // cout << "kernel compute " << e-bb << endl;
+
+    // gettimeofday(&tb, NULL);
+    cudaMemcpy(h_res, d_a, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    // gettimeofday(&te, NULL);
+    // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    // cout << "copy to host " << e-bb << endl;
+
+    cudaFree(d_a);
+    cudaFree(d_b);
+
+    return h_res;
+}*/
