@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
 
     //cuDoubleComplex *iqhh, *iqvv;
     fftw_complex *iqhh, *iqvv;
-    double *powhh;
+    double *powhh, *powvv;
 
     const int m = 1024; // cell
     const int n = 512;  // sweep
@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
     iqvv = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m*n);
 
     powhh = new double[(m/2)*n];
+    powvv = new double[(m/2)*n];
 
     double a, b, c, d;
 
@@ -95,18 +96,32 @@ int main(int argc, char **argv) {
     cout << endl;
     exit(0);*/
 
-    // Read 1 sector data (file is transposed)
-    for (int j=0; j<n; j++) {
-        for (int i=0; i<m; i++) {
-        	cin >> a >> b >> c >> d;
+    // Read 1 sector data (hh)
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+        	cin >> a >> b;
             //iqhh[i*n+j] = make_cuDoubleComplex(a, b);
             //iqvv[i*n+j] = make_cuDoubleComplex(c, d);
             iqhh[i*n+j][0] = a;
             iqhh[i*n+j][1] = b;
-            iqvv[i*n+j][0] = c;
-            iqvv[i*n+j][1] = d;
         }
     }
+
+    // Read 1 sector data (vv)
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            cin >> a >> b;
+            iqvv[i*n+j][0] = a;
+            iqvv[i*n+j][1] = b;
+        }
+    }
+
+    // for (int i=0; i<m; i++) {
+    //     for (int j=0; j<n; j++) {
+    //         cout << "(" << iqvv[i*n+j][0] << "," << iqvv[i*n+j][1] << ") ";
+    //     }
+    //     cout << endl;
+    // }
 
     // apply Hamming coefficients
     for (int i=0; i<m; i++) {
@@ -114,8 +129,14 @@ int main(int argc, char **argv) {
             //double real = iqhh[i*n+j].x;
             //double imag = iqhh[i*n+j].y;
             //iqhh[i*n+j] = make_cuDoubleComplex(real*hamming_coef[i*n+j], imag*hamming_coef[i*n+j]);
+
+            // HH
             iqhh[i*n+j][0] *= hamming_coef[i*n+j];
             iqhh[i*n+j][1] *= hamming_coef[i*n+j];
+
+            // VV
+            iqvv[i*n+j][0] *= hamming_coef[i*n+j];
+            iqvv[i*n+j][1] *= hamming_coef[i*n+j];
         }
     }
 
@@ -125,6 +146,8 @@ int main(int argc, char **argv) {
     fft_range_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m);
     fft_range_plan = fftw_plan_dft_1d(m, fft_range_buffer, fft_range_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
     for (int j=0; j<n; j++) {
+
+        // HH
         for (int i=0; i<m; i++) {
             //fft_range_buffer[i][0] = iqhh[i*n+j].x;
             //fft_range_buffer[i][1] = iqhh[i*n+j].y;
@@ -137,6 +160,17 @@ int main(int argc, char **argv) {
             iqhh[i*n+j][0] = fft_range_buffer[i][0];
             iqhh[i*n+j][1] = fft_range_buffer[i][1];
         }
+
+        // VV
+        for (int i=0; i<m; i++) {
+            fft_range_buffer[i][0] = iqvv[i*n+j][0];
+            fft_range_buffer[i][1] = iqvv[i*n+j][1];
+        }
+        fftw_execute(fft_range_plan);
+        for (int i=0; i<m; i++) {
+            iqvv[i*n+j][0] = fft_range_buffer[i][0];
+            iqvv[i*n+j][1] = fft_range_buffer[i][1];
+        }
     }
     fftw_destroy_plan(fft_range_plan);
     fftw_free(fft_range_buffer);
@@ -147,6 +181,8 @@ int main(int argc, char **argv) {
     fft_doppler_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
     fft_doppler_plan = fftw_plan_dft_1d(n, fft_doppler_buffer, fft_doppler_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
     for (int i=0; i<m; i++) {
+
+        // HH
         for (int j=0; j<n; j++) {
             //fft_doppler_buffer[j][0] = iqhh[i*n+j].x;
             //fft_doppler_buffer[j][1] = iqhh[i*n+j].y;
@@ -154,10 +190,12 @@ int main(int argc, char **argv) {
             fft_doppler_buffer[j][1] = iqhh[i*n+j][1];
         }
         fftw_execute(fft_doppler_plan);
-        for (int j=0; j<n; j++) {
+        for (int j=0; j<n/2; j++) {
             //iqhh[i*n+j] = make_cuDoubleComplex(fft_doppler_buffer[j][0], fft_doppler_buffer[j][1]);
-            iqhh[i*n+j][0] = fft_doppler_buffer[j][0];
-            iqhh[i*n+j][1] = fft_doppler_buffer[j][1];
+            iqhh[i*n+j][0] = fft_doppler_buffer[n/2-j][0];
+            iqhh[i*n+j][1] = fft_doppler_buffer[n/2-j][1];
+            iqhh[i*n+j+n/2][0] = fft_doppler_buffer[n-j][0];
+            iqhh[i*n+j+n/2][1] = fft_doppler_buffer[n-j][1];
         }
         //iqhh[i*n+(n-1)] = make_cuDoubleComplex(0.0,0.0);
         //iqhh[i*n+(n-2)] = make_cuDoubleComplex(0.0,0.0);
@@ -165,43 +203,73 @@ int main(int argc, char **argv) {
         iqhh[i*n+(n-1)][1] = 0;
         iqhh[i*n+(n-2)][0] = 0;
         iqhh[i*n+(n-2)][1] = 0;
+
+        // VV
+        for (int j=0; j<n; j++) {
+            fft_doppler_buffer[j][0] = iqvv[i*n+j][0];
+            fft_doppler_buffer[j][1] = iqvv[i*n+j][1];
+        }
+        fftw_execute(fft_doppler_plan);
+        for (int j=0; j<n/2; j++) {
+            iqvv[i*n+j][0] = fft_doppler_buffer[n/2-j][0];
+            iqvv[i*n+j][1] = fft_doppler_buffer[n/2-j][1];
+            iqvv[i*n+j+n/2][0] = fft_doppler_buffer[n-j][0];
+            iqvv[i*n+j+n/2][1] = fft_doppler_buffer[n-j][1];
+        }
+        iqvv[i*n+(n-1)][0] = 0;
+        iqvv[i*n+(n-1)][1] = 0;
+        iqvv[i*n+(n-2)][0] = 0;
+        iqvv[i*n+(n-2)][1] = 0;
     }
     fftw_destroy_plan(fft_doppler_plan);
     fftw_free(fft_doppler_buffer);
 
     // PDOP
-    //fftw_complex *fft_pdop_buffer;
-    //fft_pdop_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fftw_complex *pdophh;
-    pdophh = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fftw_complex *multhh;
-    multhh = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+    fftw_complex *fft_pdop_buffer;
+    fft_pdop_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+    fftw_complex *fft_mult_buffer;
+    fft_mult_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
     fftw_plan fft_pdop_plan;
-    fft_pdop_plan = fftw_plan_dft_1d(n, pdophh, pdophh, FFTW_FORWARD, FFTW_ESTIMATE);
+    fft_pdop_plan = fftw_plan_dft_1d(n, fft_pdop_buffer, fft_pdop_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_plan ifft_conv_plan;
-    ifft_conv_plan = fftw_plan_dft_1d(n, multhh, multhh, FFTW_BACKWARD, FFTW_ESTIMATE);
+    ifft_conv_plan = fftw_plan_dft_1d(n, fft_mult_buffer, fft_mult_buffer, FFTW_BACKWARD, FFTW_ESTIMATE);
     for (int i=0; i<m/2; i++) {
+
+        // HH
         for (int j=0; j<n; j++) {
-            pdophh[j][0] = iqhh[i*n+j][0] * iqhh[i*n+j][0] + iqhh[i*n+j][1] * iqhh[i*n+j][1];
-            pdophh[j][1] = 0;
-            //cout << pdophh[j][0] << " ";
+            fft_pdop_buffer[j][0] = iqhh[i*n+j][0] * iqhh[i*n+j][0] + iqhh[i*n+j][1] * iqhh[i*n+j][1];
+            fft_pdop_buffer[j][1] = 0;
+            //cout << fft_pdop_buffer[j][0] << " ";
         }
         //cout << endl;
-
         fftw_execute(fft_pdop_plan);
-
         for (int j=0; j<n; j++) {
-            multhh[j][0] = pdophh[j][0] * fft_ma[j][0] - pdophh[j][1] * fft_ma[j][1];
-            multhh[j][1] = pdophh[j][0] * fft_ma[j][1] + pdophh[j][1] * fft_ma[j][0];
-            //cout << "(" << multhh[j][0] << "," << multhh[j][1] << ") ";
+            fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
+            fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
+            //cout << "(" << fft_mult_buffer[j][0] << "," << fft_mult_buffer[j][1] << ") ";
+        }
+        //cout << endl;
+        fftw_execute(ifft_conv_plan);
+        for (int j=0; j<n; j++) {
+            powhh[i*n+j] = fft_mult_buffer[j][0]/n;
+            //cout << powhh[i*n+j] << " ";
         }
         //cout << endl;
 
-        fftw_execute(ifft_conv_plan);
-
+        // VV
         for (int j=0; j<n; j++) {
-            powhh[i*n+j] = multhh[j][0];
-            //cout << powhh[i*n+j] << ",";
+            fft_pdop_buffer[j][0] = iqvv[i*n+j][0] * iqvv[i*n+j][0] + iqvv[i*n+j][1] * iqvv[i*n+j][1];
+            fft_pdop_buffer[j][1] = 0;
+        }
+        fftw_execute(fft_pdop_plan);
+        for (int j=0; j<n; j++) {
+            fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
+            fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
+        }
+        fftw_execute(ifft_conv_plan);
+        for (int j=0; j<n; j++) {
+            powvv[i*n+j] = fft_mult_buffer[j][0]/n;
+            //cout << powvv[i*n+j] << " ";
         }
         //cout << endl;
     }
@@ -210,25 +278,29 @@ int main(int argc, char **argv) {
     //fftw_free(fft_pdop_buffer);
 
     // Reflectivity
-    double *zdb, *zdr;
+    double *z, *zdb, *zdr;
+    z = new double[m/2];
     zdb = new double[m/2];
     zdr = new double[m/2];
     for (int i=0; i<m/2; i++) {
         for (int j=1; j<n; j++) {
             powhh[i*n] += powhh[i*n+j];
+            powvv[i*n] += powvv[i*n+j];
         }
         //cout << powhh[i*n] << endl;
-        zdb[i] = 10 * log10(pow(i*k_rangeres, 2.0) * k_calib * powhh[i]);
-        //zdr[i] = 10 * (log10(powhh[i])-log10(powvv[i]));
-        //cout << zdb[i] << endl;
+        z[i] = pow(i*k_rangeres, 2.0) * k_calib * powhh[i*n];
+        zdb[i] = 10 * log10(z[i]);
+        zdr[i] = 10 * (log10(powhh[i*n])-log10(powvv[i*n]));
+        cout << zdb[i] << " " << zdr[i] << endl;
     }
 
 
     delete zdr;
     delete zdb;
+    delete z;
 
-    fftw_free(multhh);
-    fftw_free(pdophh);
+    fftw_free(fft_mult_buffer);
+    fftw_free(fft_pdop_buffer);
     fftw_free(fft_ma);
 
     delete powhh;
