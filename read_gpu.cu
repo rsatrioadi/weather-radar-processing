@@ -1,8 +1,9 @@
 #include <iostream>
 #include <stdlib.h>
-#include <cuda_runtime.h>
+#include <cuda.h>
 #include <cuComplex.h>
 #include <fftw3.h>
+#include <cufft.h>
 
 using namespace std;
 
@@ -59,6 +60,13 @@ __global__ void __apply_hamming(cuDoubleComplex *a, double *b, int m, int n) {
     a[i] = make_cuDoubleComplex(b[i%(m*n)]*real, b[i%(m*n)]*imag);
 }
 
+__global__ void __shift(cuDoubleComplex *out, cuDoubleComplex *in, int n) {
+    unsigned int i = blockIdx.x, j = threadIdx.x;
+
+    out[i*n+j] = make_cuDoubleComplex(in[i*n+(n/2-j)].x, in[i*n+(n/2-j)].y);
+    out[i*n+j+n/2] = make_cuDoubleComplex(in[i*n+(n-j)].x, in[i*n+(n-j)].y);
+}
+
 int main(int argc, char **argv) {
 
     cuDoubleComplex *iq;
@@ -82,30 +90,41 @@ int main(int argc, char **argv) {
 
     // Generate MA coefficients
     double *ma_coef = generate_ma_coef(ma_count);
-    fftw_complex *fft_ma = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fftw_plan fft_ma_plan = fftw_plan_dft_1d(n, fft_ma, fft_ma, FFTW_FORWARD, FFTW_ESTIMATE);
+    fftw_complex *_fft_ma = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+    fftw_plan fft_ma_plan = fftw_plan_dft_1d(n, _fft_ma, _fft_ma, FFTW_FORWARD, FFTW_ESTIMATE);
     for (int j=0; j<ma_count; j++) {
-        fft_ma[j][0] = ma_coef[j];
-        fft_ma[j][1] = 0;
+        _fft_ma[j][0] = ma_coef[j];
+        _fft_ma[j][1] = 0;
     }
     for (int j=ma_count; j<n; j++) {
-        fft_ma[j][0] = 0;
-        fft_ma[j][1] = 0;
+        _fft_ma[j][0] = 0;
+        _fft_ma[j][1] = 0;
     }
     fftw_execute(fft_ma_plan);
     fftw_destroy_plan(fft_ma_plan);
 
+    cuDoubleComplex *fft_ma;
+    fft_ma = new cuDoubleComplex[n];
+
+    for (int j=0; j<n; j++) {
+        fft_ma[j] = make_cuDoubleComplex(_fft_ma[j][0], _fft_ma[j][1]);
+    }
+
+    fftw_free(_fft_ma);
+
     // Device buffers
     /*__constant__*/ double *d_hamming;
-    /*__constant__*/ //cuDoubleComplex *d_ma;
+    /*__constant__*/ cuDoubleComplex *d_ma;
     cuDoubleComplex *d_iq;
+    cuDoubleComplex *d_shift;
     //double *d_pow;
 
     cudaMalloc(&d_hamming, m*n*sizeof(double));
     cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(double), cudaMemcpyHostToDevice);
-    //cudaMalloc(&d_ma, n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_ma, n*sizeof(cuDoubleComplex));
+    cudaMemcpy(d_ma, fft_ma, n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
     cudaMalloc(&d_iq, 2*m*n*sizeof(cuDoubleComplex));
-
+    cudaMalloc(&d_shift, 2*m*n*sizeof(cuDoubleComplex));
 
     // Read 1 sector data
     for (int i=0; i<m*2; i++) {
@@ -120,13 +139,6 @@ int main(int argc, char **argv) {
     __apply_hamming<<<2*m,n>>>(d_iq, d_hamming, m, n);
     cudaMemcpy(iq, d_iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
 
-    for (int i=0; i<m*2; i++) {
-        for (int j=0; j<n; j++) {
-            cout << "(" << iq[i*n+j].x << "," << iq[i*n+j].y << ") ";
-        }
-        cout << endl;
-    }
-
     // FFT range profile
     fftw_complex *fft_range_buffer;
     fftw_plan fft_range_plan;
@@ -136,8 +148,6 @@ int main(int argc, char **argv) {
 
         // HH
         for (int i=0; i<m; i++) {
-            //fft_range_buffer[i][0] = iq[i*n+j].x;
-            //fft_range_buffer[i][1] = iq[i*n+j].y;
             fft_range_buffer[i][0] = iq[i*n+j].x;
             fft_range_buffer[i][1] = iq[i*n+j].y;
         }
@@ -160,26 +170,34 @@ int main(int argc, char **argv) {
     fftw_free(fft_range_buffer);
 
     // FFT Doppler profile
-    fftw_complex *fft_doppler_buffer;
-    fftw_plan fft_doppler_plan;
-    fft_doppler_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fft_doppler_plan = fftw_plan_dft_1d(n, fft_doppler_buffer, fft_doppler_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
-    for (int i=0; i<m*2; i++) {
-
-        for (int j=0; j<n; j++) {
-            fft_doppler_buffer[j][0] = iq[i*n+j].x;
-            fft_doppler_buffer[j][1] = iq[i*n+j].y;
-        }
-        fftw_execute(fft_doppler_plan);
-        for (int j=0; j<n/2; j++) {
-            iq[i*n+j] = make_cuDoubleComplex(fft_doppler_buffer[n/2-j][0], fft_doppler_buffer[n/2-j][1]);
-            iq[i*n+j+n/2] = make_cuDoubleComplex(fft_doppler_buffer[n-j][0], fft_doppler_buffer[n-j][1]);
-        }
-        iq[i*n+(n-1)] = make_cuDoubleComplex(0.0,0.0);
-        iq[i*n+(n-2)] = make_cuDoubleComplex(0.0,0.0);
+    cudaMemcpy(d_iq, iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+    cufftHandle handle;
+    int rank = 1;                     // --- 1D FFTs
+    int nn[] = { n };                 // --- Size of the Fourier transform
+    int istride = 1, ostride = 1;     // --- Distance between two successive input/output elements
+    int idist = n, odist = n;         // --- Distance between batches
+    int inembed[] = { 0 };            // --- Input size with pitch (ignored for 1D transforms)
+    int onembed[] = { 0 };            // --- Output size with pitch (ignored for 1D transforms)
+    int batch = 2*m;                  // --- Number of batched executions
+    cufftPlanMany(&handle, rank, nn, 
+                  inembed, istride, idist,
+                  onembed, ostride, odist, CUFFT_Z2Z, batch);
+    //cufftPlan1d(&handle, n, CUFFT_Z2Z, 2*m);
+    cufftExecZ2Z(handle,  d_iq, d_iq, CUFFT_FORWARD);
+    __shift<<<2*m,n/2>>>(d_shift, d_iq, n);
+    cudaMemcpy(iq, d_shift, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    for (int i=0; i<2*m; i++) {
+        iq[i*n+(n-1)] = make_cuDoubleComplex(0,0);
+        iq[i*n+(n-2)] = make_cuDoubleComplex(0,0);
     }
-    fftw_destroy_plan(fft_doppler_plan);
-    fftw_free(fft_doppler_buffer);
+
+    // for (int i=0; i<m*2; i++) {
+    //     for (int j=0; j<n; j++) {
+    //         cout << "(" << iq[i*n+j].x << "," << iq[i*n+j].y << ") ";
+    //     }
+    //     cout << endl;
+    // }
+    // exit(0);
 
     cuDoubleComplex *iqhalf;
     iqhalf = new cuDoubleComplex[m*n];
@@ -209,8 +227,8 @@ int main(int argc, char **argv) {
         //cout << endl;
         fftw_execute(fft_pdop_plan);
         for (int j=0; j<n; j++) {
-            fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
-            fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
+            fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j].x - fft_pdop_buffer[j][1] * fft_ma[j].y;
+            fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j].y + fft_pdop_buffer[j][1] * fft_ma[j].x;
             //cout << "(" << fft_mult_buffer[j][0] << "," << fft_mult_buffer[j][1] << ") ";
         }
         //cout << endl;
@@ -247,6 +265,7 @@ int main(int argc, char **argv) {
     cudaFree(d_hamming);
     //cudaFree(d_ma);
     cudaFree(d_iq);
+    cudaFree(d_shift);
 
     delete iqhalf;
 
@@ -256,7 +275,6 @@ int main(int argc, char **argv) {
 
     fftw_free(fft_mult_buffer);
     fftw_free(fft_pdop_buffer);
-    fftw_free(fft_ma);
 
     delete pow_;
     delete iq;

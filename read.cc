@@ -133,19 +133,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    for (int i=0; i<m; i++) {
-        for (int j=0; j<n; j++) {
-            cout << "(" << iqhh[i*n+j][0] << "," << iqhh[i*n+j][1] << ") ";
-        }
-        cout << endl;
-    }
-    for (int i=0; i<m; i++) {
-        for (int j=0; j<n; j++) {
-            cout << "(" << iqvv[i*n+j][0] << "," << iqvv[i*n+j][1] << ") ";
-        }
-        cout << endl;
-    }
-
     // FFT range profile
     fftw_complex *fft_range_buffer;
     fftw_plan fft_range_plan;
@@ -229,6 +216,20 @@ int main(int argc, char **argv) {
     }
     fftw_destroy_plan(fft_doppler_plan);
     fftw_free(fft_doppler_buffer);
+
+    // for (int i=0; i<m; i++) {
+    //     for (int j=0; j<n; j++) {
+    //         cout << "(" << iqhh[i*n+j][0] << "," << iqhh[i*n+j][1] << ") ";
+    //     }
+    //     cout << endl;
+    // }
+    // for (int i=0; i<m; i++) {
+    //     for (int j=0; j<n; j++) {
+    //         cout << "(" << iqvv[i*n+j][0] << "," << iqvv[i*n+j][1] << ") ";
+    //     }
+    //     cout << endl;
+    // }
+    // exit(0);
 
     // PDOP
     fftw_complex *fft_pdop_buffer;
