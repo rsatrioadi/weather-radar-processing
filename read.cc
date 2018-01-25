@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <cuComplex.h>
 #include <fftw3.h>
+#include <sys/time.h>
 
 using namespace std;
 
@@ -50,6 +51,11 @@ double *generate_ma_coef(int n){
 }
 
 int main(int argc, char **argv) {
+
+    struct timeval tb, te;
+    unsigned long long bb, e;
+
+    gettimeofday(&tb, NULL);
 
     //cuDoubleComplex *iqhh, *iqvv;
     fftw_complex *iqhh, *iqvv;
@@ -116,6 +122,14 @@ int main(int argc, char **argv) {
         }
     }
 
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    cout << "initialization: " << e-bb << endl;
+
+    gettimeofday(&tb, NULL);
+
     // apply Hamming coefficients
     for (int i=0; i<m; i++) {
         for (int j=0; j<n; j++) {
@@ -176,19 +190,31 @@ int main(int argc, char **argv) {
     for (int i=0; i<m; i++) {
 
         // HH
+        double avgi = 0, avgq = 0;
+        for (int j=0; j<n; j++) {
+            avgi += iqhh[i*n+j][0];
+            avgq += iqhh[i*n+j][1];
+        }
+        avgi /= n;
+        avgq /= n;
         for (int j=0; j<n; j++) {
             //fft_doppler_buffer[j][0] = iqhh[i*n+j].x;
             //fft_doppler_buffer[j][1] = iqhh[i*n+j].y;
-            fft_doppler_buffer[j][0] = iqhh[i*n+j][0];
-            fft_doppler_buffer[j][1] = iqhh[i*n+j][1];
+            fft_doppler_buffer[j][0] = (iqhh[i*n+j][0] - avgi);
+            fft_doppler_buffer[j][1] = (iqhh[i*n+j][1] - avgq) * -1;
         }
         fftw_execute(fft_doppler_plan);
+
+        // for (int j=0; j<n; j++) {
+        //     cout << "(" << fft_doppler_buffer[j][0] << "," << fft_doppler_buffer[j][1] << ") ";
+        // }
+        // cout << endl;
         for (int j=0; j<n/2; j++) {
             //iqhh[i*n+j] = make_cuDoubleComplex(fft_doppler_buffer[j][0], fft_doppler_buffer[j][1]);
-            iqhh[i*n+j][0] = fft_doppler_buffer[n/2-j][0];
-            iqhh[i*n+j][1] = fft_doppler_buffer[n/2-j][1];
-            iqhh[i*n+j+n/2][0] = fft_doppler_buffer[n-j][0];
-            iqhh[i*n+j+n/2][1] = fft_doppler_buffer[n-j][1];
+            iqhh[i*n+j][0] = fft_doppler_buffer[j+n/2][0];
+            iqhh[i*n+j][1] = fft_doppler_buffer[j+n/2][1] * -1;
+            iqhh[i*n+j+n/2][0] = fft_doppler_buffer[j][0];
+            iqhh[i*n+j+n/2][1] = fft_doppler_buffer[j][1] * -1;
         }
         //iqhh[i*n+(n-1)] = make_cuDoubleComplex(0.0,0.0);
         //iqhh[i*n+(n-2)] = make_cuDoubleComplex(0.0,0.0);
@@ -198,16 +224,28 @@ int main(int argc, char **argv) {
         iqhh[i*n+(n-2)][1] = 0;
 
         // VV
+        avgi = 0; avgq = 0;
         for (int j=0; j<n; j++) {
-            fft_doppler_buffer[j][0] = iqvv[i*n+j][0];
-            fft_doppler_buffer[j][1] = iqvv[i*n+j][1];
+            avgi += iqvv[i*n+j][0];
+            avgq += iqvv[i*n+j][1];
+        }
+        avgi /= n;
+        avgq /= n;
+        for (int j=0; j<n; j++) {
+            fft_doppler_buffer[j][0] = (iqvv[i*n+j][0] - avgi);
+            fft_doppler_buffer[j][1] = (iqvv[i*n+j][1] - avgq) * -1;
         }
         fftw_execute(fft_doppler_plan);
+
+        // for (int j=0; j<n; j++) {
+        //     cout << "(" << fft_doppler_buffer[j][0] << "," << fft_doppler_buffer[j][1] << ") ";
+        // }
+        // cout << endl;
         for (int j=0; j<n/2; j++) {
-            iqvv[i*n+j][0] = fft_doppler_buffer[n/2-j][0];
-            iqvv[i*n+j][1] = fft_doppler_buffer[n/2-j][1];
-            iqvv[i*n+j+n/2][0] = fft_doppler_buffer[n-j][0];
-            iqvv[i*n+j+n/2][1] = fft_doppler_buffer[n-j][1];
+            iqvv[i*n+j][0] = fft_doppler_buffer[j+n/2][0];
+            iqvv[i*n+j][1] = fft_doppler_buffer[j+n/2][1] * -1;
+            iqvv[i*n+j+n/2][0] = fft_doppler_buffer[j][0];
+            iqvv[i*n+j+n/2][1] = fft_doppler_buffer[j][1] * -1;
         }
         iqvv[i*n+(n-1)][0] = 0;
         iqvv[i*n+(n-1)][1] = 0;
@@ -246,33 +284,38 @@ int main(int argc, char **argv) {
         for (int j=0; j<n; j++) {
             fft_pdop_buffer[j][0] = iqhh[i*n+j][0] * iqhh[i*n+j][0] + iqhh[i*n+j][1] * iqhh[i*n+j][1];
             fft_pdop_buffer[j][1] = 0;
-            //cout << fft_pdop_buffer[j][0] << " ";
+            // cout << fft_pdop_buffer[j][0] << " ";
         }
-        //cout << endl;
+        // cout << endl;
         fftw_execute(fft_pdop_plan);
         for (int j=0; j<n; j++) {
             fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
             fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
-            //cout << "(" << fft_mult_buffer[j][0] << "," << fft_mult_buffer[j][1] << ") ";
+            // cout << "(" << fft_mult_buffer[j][0] << "," << fft_mult_buffer[j][1] << ") ";
         }
-        //cout << endl;
+        // cout << endl;
         fftw_execute(ifft_conv_plan);
         for (int j=0; j<n; j++) {
             powhh[i*n+j] = fft_mult_buffer[j][0]/n;
-            //cout << powhh[i*n+j] << " ";
+            // cout << powhh[i*n+j] << " ";
         }
-        //cout << endl;
-
+        // cout << endl;
+    }
+    for (int i=0; i<m/2; i++) {
         // VV
         for (int j=0; j<n; j++) {
             fft_pdop_buffer[j][0] = iqvv[i*n+j][0] * iqvv[i*n+j][0] + iqvv[i*n+j][1] * iqvv[i*n+j][1];
             fft_pdop_buffer[j][1] = 0;
+            // cout << fft_pdop_buffer[j][0] << " ";
         }
+        // cout << endl;
         fftw_execute(fft_pdop_plan);
         for (int j=0; j<n; j++) {
             fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
             fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
+            // cout << "(" << fft_pdop_buffer[j][0] << "," << fft_pdop_buffer[j][1] << ") ";
         }
+        // cout << endl;
         fftw_execute(ifft_conv_plan);
         for (int j=0; j<n; j++) {
             powvv[i*n+j] = fft_mult_buffer[j][0]/n;
@@ -298,8 +341,14 @@ int main(int argc, char **argv) {
         z[i] = pow(i*k_rangeres, 2.0) * k_calib * powhh[i*n];
         zdb[i] = 10 * log10(z[i]);
         zdr[i] = 10 * (log10(powhh[i*n])-log10(powvv[i*n]));
-        cout << zdb[i] << " " << zdr[i] << endl;
+        //cout << zdb[i] << " " << zdr[i] << endl;
     }
+
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    cout << "processing: " << e-bb << endl;
 
 
     delete zdr;

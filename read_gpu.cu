@@ -140,6 +140,29 @@ int main(int argc, char **argv) {
     cudaMemcpy(iq, d_iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
 
     // FFT range profile
+    cuDoubleComplex *transposed = new cuDoubleComplex[m*2*n];
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            transposed[i*(2*n)+j] = make_cuDoubleComplex(iq[i*n+j].x, iq[i*n+j].y);
+            transposed[i*(2*n)+(j+n)] = make_cuDoubleComplex(iq[(i+n)*n+j].x, iq[(i+n)*n+j].y);
+        }
+    }
+    free transposed;
+    cudaMemcpy(d_iq, transposed, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+    cufftHandle handle;
+    int rank = 1;                     // --- 1D FFTs
+    int nn[] = { n };                 // --- Size of the Fourier transform
+    int istride = n*2, ostride = n*2;     // --- Distance between two successive input/output elements
+    int idist = 1, odist = 1;         // --- Distance between batches
+    int inembed[] = { 0 };            // --- Input size with pitch (ignored for 1D transforms)
+    int onembed[] = { 0 };            // --- Output size with pitch (ignored for 1D transforms)
+    int batch = m;                  // --- Number of batched executions
+    cufftPlanMany(&handle, rank, nn, 
+                  inembed, istride, idist,
+                  onembed, ostride, odist, CUFFT_Z2Z, batch);
+    cufftExecZ2Z(handle,  d_iq, d_iq, CUFFT_FORWARD);
+    cudaMemcpy(transposed, d_iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+
     fftw_complex *fft_range_buffer;
     fftw_plan fft_range_plan;
     fft_range_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m);
