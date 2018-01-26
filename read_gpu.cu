@@ -4,8 +4,14 @@
 #include <cuComplex.h>
 #include <fftw3.h>
 #include <cufft.h>
+#include <sys/time.h>
 
 using namespace std;
+
+#define k_rangeres 30
+#define k_calib 1941.05
+
+#define RESULT_SIZE 2
 
 double *generate_hamming_coef(int m, int n) {
 
@@ -51,37 +57,121 @@ double *generate_ma_coef(int n){
     return _ma_coef;
 }
 
-__global__ void __apply_hamming(cuDoubleComplex *a, double *b, int m, int n) {
+__global__ void __apply_hamming(cuDoubleComplex *a, double *b) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     double real, imag;
     real = a[i].x;
     imag = a[i].y;
-    a[i] = make_cuDoubleComplex(b[i%(m*n)]*real, b[i%(m*n)]*imag);
+    a[i] = make_cuDoubleComplex(b[i]*real, b[i]*imag);
 }
 
-__global__ void __shift(cuDoubleComplex *out, cuDoubleComplex *in, int n) {
+__global__ void __apply_ma(cuDoubleComplex *inout, cuDoubleComplex *macoef) {
+    unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+    double ii, qq, mi, mq;
+    ii = inout[i*n+j].x;
+    qq = inout[i*n+j].y;
+    mi = macoef[j].x;
+    mq = macoef[j].y;
+
+    inout[i*n+j] = make_cuDoubleComplex(ii*mi-qq*mq, ii*mq+qq*mi);
+}
+
+__global__ void __conjugate(cuDoubleComplex *a) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    a[i] = make_cuDoubleComplex(a[i].x, a[i].y * -1);
+}
+
+__global__ void __shift(cuDoubleComplex *inout, int n) {
     unsigned int i = blockIdx.x, j = threadIdx.x;
 
-    out[i*n+j] = make_cuDoubleComplex(in[i*n+(n/2-j)].x, in[i*n+(n/2-j)].y);
-    out[i*n+j+n/2] = make_cuDoubleComplex(in[i*n+(n-j)].x, in[i*n+(n-j)].y);
+    cuDoubleComplex temp = inout[i*n+j];
+    inout[i*n+j] = inout[i*n+(j+n/2)];
+    inout[i*n+(j+n/2)] = temp;
+}
+
+__global__ void __trim(cuDoubleComplex *inout, int n) {
+    unsigned int i = blockIdx.x, j = n-threadIdx.x-1;
+    inout[i*n+j] = make_cuDoubleComplex(0, 0);
+}
+
+__global__ void __abssqr(cuDoubleComplex *inout, int n) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    double real, imag;
+    real = inout[i].x;
+    imag = inout[i].y;
+    inout[i] = make_cuDoubleComplex(real*real+imag*imag, 0);    
+}
+
+__global__ void __sumcomplex(cuDoubleComplex *g_idata, cuDoubleComplex *g_odata) {
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    g_odata[i] = make_cuDoubleComplex(g_idata[i].x, g_idata[i].y);
+    __syncthreads();
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (tid < s) {
+            g_odata[i] = make_cuDoubleComplex(g_odata[i].x+g_odata[i + s].x, g_odata[i].y+g_odata[i + s].y);
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void __sum_inplace(cuDoubleComplex *g_idata) {
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    __syncthreads();
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (tid < s) {
+            g_idata[i] = make_cuDoubleComplex(g_idata[i].x+g_idata[i + s].x, 0);
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void __avgconj(cuDoubleComplex *in, cuDoubleComplex *sum) {
+    unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+    double avgx = sum[i*n].x/n;
+    double avgy = sum[i*n].y/n;
+    in[i*n+j] = make_cuDoubleComplex(in[i*n+j].x-avgx, (in[i*n+j].y-avgy)*-1);
+}
+
+__global__ void __scale_real(cuDoubleComplex *inout) {
+    unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+    inout[i*n+j] = make_cuDoubleComplex(inout[i*n+j].x/n, 0);
+}
+
+__global__ void __calcresult(cuDoubleComplex *hh, cuDoubleComplex *vv, double *out, int n) {
+    unsigned int i = blockIdx.x;
+
+    double z = pow(i*k_rangeres, 2.0) * k_calib * hh[i*n].x;
+    double zdb = 10 * log10(z);
+    double zdr = 10 * (log10(hh[i*n].x)-log10(vv[i*n].x));
+    out[i*RESULT_SIZE+0] = zdb;
+    out[i*RESULT_SIZE+1] = zdr;
 }
 
 int main(int argc, char **argv) {
 
-    cuDoubleComplex *iq;
-    double *pow_;
+    struct timeval tb, te;
+    unsigned long long bb, e;
+
+    gettimeofday(&tb, NULL);
+
+    cuDoubleComplex *iqhh, *iqvv;
+    double *result;
 
     const int m = 1024; // cell
     const int n = 512;  // sweep
 
     const int ma_count = 7;
 
-    const double k_rangeres = 30;
-    const double k_calib = 1941.05;
-
-    iq = new cuDoubleComplex[2*m*n];
-    pow_ = new double[m*n];
+    iqhh = new cuDoubleComplex[m*n];
+    iqvv = new cuDoubleComplex[m*n];
+    result = new double[(m/2)*RESULT_SIZE];
 
     double a, b;
 
@@ -102,205 +192,184 @@ int main(int argc, char **argv) {
     }
     fftw_execute(fft_ma_plan);
     fftw_destroy_plan(fft_ma_plan);
-
     cuDoubleComplex *fft_ma;
     fft_ma = new cuDoubleComplex[n];
-
     for (int j=0; j<n; j++) {
         fft_ma[j] = make_cuDoubleComplex(_fft_ma[j][0], _fft_ma[j][1]);
     }
-
     fftw_free(_fft_ma);
 
     // Device buffers
     /*__constant__*/ double *d_hamming;
     /*__constant__*/ cuDoubleComplex *d_ma;
-    cuDoubleComplex *d_iq;
-    cuDoubleComplex *d_shift;
-    //double *d_pow;
+    cuDoubleComplex *d_iqhh, *d_iqvv;
+    cuDoubleComplex *d_sum;
+    double *d_result;
+    //double *d_powhh, *d_powvv;
 
     cudaMalloc(&d_hamming, m*n*sizeof(double));
-    cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(double), cudaMemcpyHostToDevice);
     cudaMalloc(&d_ma, n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_iqhh, m*n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_iqvv, m*n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_sum, m*n*sizeof(cuDoubleComplex));
+    cudaMalloc(&d_result, (m/2)*RESULT_SIZE*sizeof(double));
+
+    cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ma, fft_ma, n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-    cudaMalloc(&d_iq, 2*m*n*sizeof(cuDoubleComplex));
-    cudaMalloc(&d_shift, 2*m*n*sizeof(cuDoubleComplex));
 
     // Read 1 sector data
-    for (int i=0; i<m*2; i++) {
-        for (int j=0; j<n; j++) {
-            cin >> a >> b;
-            iq[i*n+j] = make_cuDoubleComplex(a, b);
-        }
-    }
-
-    // apply Hamming coefficients
-    cudaMemcpy(d_iq, iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-    __apply_hamming<<<2*m,n>>>(d_iq, d_hamming, m, n);
-    cudaMemcpy(iq, d_iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
-
-    // FFT range profile
-    cuDoubleComplex *transposed = new cuDoubleComplex[m*2*n];
     for (int i=0; i<m; i++) {
         for (int j=0; j<n; j++) {
-            transposed[i*(2*n)+j] = make_cuDoubleComplex(iq[i*n+j].x, iq[i*n+j].y);
-            transposed[i*(2*n)+(j+n)] = make_cuDoubleComplex(iq[(i+n)*n+j].x, iq[(i+n)*n+j].y);
+            cin >> a >> b;
+            iqhh[i*n+j] = make_cuDoubleComplex(a, b);
         }
     }
-    free transposed;
-    cudaMemcpy(d_iq, transposed, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-    cufftHandle handle;
-    int rank = 1;                     // --- 1D FFTs
-    int nn[] = { n };                 // --- Size of the Fourier transform
-    int istride = n*2, ostride = n*2;     // --- Distance between two successive input/output elements
-    int idist = 1, odist = 1;         // --- Distance between batches
-    int inembed[] = { 0 };            // --- Input size with pitch (ignored for 1D transforms)
-    int onembed[] = { 0 };            // --- Output size with pitch (ignored for 1D transforms)
-    int batch = m;                  // --- Number of batched executions
-    cufftPlanMany(&handle, rank, nn, 
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            cin >> a >> b;
+            iqvv[i*n+j] = make_cuDoubleComplex(a, b);
+        }
+    }
+
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    cout << "initialization: " << e-bb << endl;
+
+    gettimeofday(&tb, NULL);
+
+    cudaMemcpy(d_iqhh, iqhh, m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_iqvv, iqvv, m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    cout << "memcpy to device: " << e-bb << endl;
+
+    gettimeofday(&tb, NULL);
+
+    // apply Hamming coefficients
+    __apply_hamming<<<m,n>>>(d_iqhh, d_hamming);
+    __apply_hamming<<<m,n>>>(d_iqvv, d_hamming);
+
+    // FFT range profile
+    cufftHandle fft_range_handle;
+    int rank = 1;                   // --- 1D FFTs
+    int nn[] = { m };               // --- Size of the Fourier transform
+    int istride = n, ostride = n;   // --- Distance between two successive input/output elements
+    int idist = 1, odist = 1;       // --- Distance between batches
+    int inembed[] = { 0 };          // --- Input size with pitch (ignored for 1D transforms)
+    int onembed[] = { 0 };          // --- Output size with pitch (ignored for 1D transforms)
+    int batch = n;                  // --- Number of batched executions
+    cufftPlanMany(&fft_range_handle, rank, nn, 
                   inembed, istride, idist,
                   onembed, ostride, odist, CUFFT_Z2Z, batch);
-    cufftExecZ2Z(handle,  d_iq, d_iq, CUFFT_FORWARD);
-    cudaMemcpy(transposed, d_iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    cufftExecZ2Z(fft_range_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
+    cufftExecZ2Z(fft_range_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
 
-    fftw_complex *fft_range_buffer;
-    fftw_plan fft_range_plan;
-    fft_range_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * m);
-    fft_range_plan = fftw_plan_dft_1d(m, fft_range_buffer, fft_range_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
-    for (int j=0; j<n; j++) {
+    // FFT+shift Doppler profile
+    cufftHandle fft_doppler_handle;
+    __sumcomplex<<<m,n>>>(d_iqhh, d_sum);
+    __avgconj<<<m,n>>>(d_iqhh, d_sum);
+    __sumcomplex<<<m,n>>>(d_iqvv, d_sum);
+    __avgconj<<<m,n>>>(d_iqvv, d_sum);
+    cufftPlan1d(&fft_doppler_handle, n, CUFFT_Z2Z, m);
+    cufftExecZ2Z(fft_doppler_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
+    cufftExecZ2Z(fft_doppler_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+    __conjugate<<<m,n>>>(d_iqhh);
+    __conjugate<<<m,n>>>(d_iqvv);
+    __shift<<<m,n/2>>>(d_iqhh, n);
+    __shift<<<m,n/2>>>(d_iqvv, n);
+    __trim<<<m,2>>>(d_iqhh, n);
+    __trim<<<m,2>>>(d_iqvv, n);
 
-        // HH
-        for (int i=0; i<m; i++) {
-            fft_range_buffer[i][0] = iq[i*n+j].x;
-            fft_range_buffer[i][1] = iq[i*n+j].y;
-        }
-        fftw_execute(fft_range_plan);
-        for (int i=0; i<m; i++) {
-            iq[i*n+j] = make_cuDoubleComplex(fft_range_buffer[i][0], fft_range_buffer[i][1]);
-        }
+    // Get absolute value
+    __abssqr<<<m/2,n>>>(d_iqhh, n);
+    __abssqr<<<m/2,n>>>(d_iqvv, n);
 
-        // VV
-        for (int i=0; i<m; i++) {
-            fft_range_buffer[i][0] = iq[(i+m)*n+j].x;
-            fft_range_buffer[i][1] = iq[(i+m)*n+j].y;
-        }
-        fftw_execute(fft_range_plan);
-        for (int i=0; i<m; i++) {
-            iq[(i+m)*n+j] = make_cuDoubleComplex(fft_range_buffer[i][0], fft_range_buffer[i][1]);
-        }
-    }
-    fftw_destroy_plan(fft_range_plan);
-    fftw_free(fft_range_buffer);
+    // FFT PDOP
+    cufftHandle fft_pdop_handle;
+    cufftPlan1d(&fft_pdop_handle, n, CUFFT_Z2Z, m/2);
+    cufftExecZ2Z(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
+    cufftExecZ2Z(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
 
-    // FFT Doppler profile
-    cudaMemcpy(d_iq, iq, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-    cufftHandle handle;
-    int rank = 1;                     // --- 1D FFTs
-    int nn[] = { n };                 // --- Size of the Fourier transform
-    int istride = 1, ostride = 1;     // --- Distance between two successive input/output elements
-    int idist = n, odist = n;         // --- Distance between batches
-    int inembed[] = { 0 };            // --- Input size with pitch (ignored for 1D transforms)
-    int onembed[] = { 0 };            // --- Output size with pitch (ignored for 1D transforms)
-    int batch = 2*m;                  // --- Number of batched executions
-    cufftPlanMany(&handle, rank, nn, 
-                  inembed, istride, idist,
-                  onembed, ostride, odist, CUFFT_Z2Z, batch);
-    //cufftPlan1d(&handle, n, CUFFT_Z2Z, 2*m);
-    cufftExecZ2Z(handle,  d_iq, d_iq, CUFFT_FORWARD);
-    __shift<<<2*m,n/2>>>(d_shift, d_iq, n);
-    cudaMemcpy(iq, d_shift, 2*m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
-    for (int i=0; i<2*m; i++) {
-        iq[i*n+(n-1)] = make_cuDoubleComplex(0,0);
-        iq[i*n+(n-2)] = make_cuDoubleComplex(0,0);
-    }
+    // Apply MA coefficients
+    __apply_ma<<<m/2,n>>>(d_iqhh, d_ma);
+    __apply_ma<<<m/2,n>>>(d_iqvv, d_ma);
 
-    // for (int i=0; i<m*2; i++) {
-    //     for (int j=0; j<n; j++) {
-    //         cout << "(" << iq[i*n+j].x << "," << iq[i*n+j].y << ") ";
-    //     }
-    //     cout << endl;
+    // Inverse FFT
+    cufftExecZ2Z(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_INVERSE);
+    cufftExecZ2Z(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_INVERSE);
+    __scale_real<<<m/2,n>>>(d_iqhh);
+    __scale_real<<<m/2,n>>>(d_iqvv);
+
+    // Sum
+    __sum_inplace<<<m/2,n>>>(d_iqhh);
+    __sum_inplace<<<m/2,n>>>(d_iqvv);
+
+    // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+
+    // for (int i=0; i<m/2; i++) {
+    //     double z = pow(i*k_rangeres, 2.0) * k_calib * iqhh[i*n].x;
+    //     double zdb = 10 * log10(z);
+    //     double zdr = 10 * (log10(iqhh[i*n].x)-log10(iqvv[i*n].x));
+    //     cout << zdb << " " << zdr << endl;
     // }
     // exit(0);
 
-    cuDoubleComplex *iqhalf;
-    iqhalf = new cuDoubleComplex[m*n];
-    for (int i=0; i<m/2; i++) {
-        for (int j=0; j<n; j++) {
-            iqhalf[i*n+j] = make_cuDoubleComplex(iq[i*n+j].x, iq[i*n+j].y);
-            iqhalf[(i+m/2)*n+j] = make_cuDoubleComplex(iq[(i+m)*n+j].x, iq[(i+m)*n+j].y);
-        }
-    }
+    // Calculate ZdB, Zdr
+    __calcresult<<<m/2,1>>>(d_iqhh, d_iqvv, d_result, n);
 
-    // PDOP
-    fftw_complex *fft_pdop_buffer;
-    fft_pdop_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fftw_complex *fft_mult_buffer;
-    fft_mult_buffer = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
-    fftw_plan fft_pdop_plan;
-    fft_pdop_plan = fftw_plan_dft_1d(n, fft_pdop_buffer, fft_pdop_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
-    fftw_plan ifft_conv_plan;
-    ifft_conv_plan = fftw_plan_dft_1d(n, fft_mult_buffer, fft_mult_buffer, FFTW_BACKWARD, FFTW_ESTIMATE);
-    for (int i=0; i<m; i++) {
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
 
-        for (int j=0; j<n; j++) {
-            fft_pdop_buffer[j][0] = iqhalf[i*n+j].x * iqhalf[i*n+j].x + iqhalf[i*n+j].y * iqhalf[i*n+j].y;
-            fft_pdop_buffer[j][1] = 0;
-            //cout << fft_pdop_buffer[j][0] << " ";
-        }
-        //cout << endl;
-        fftw_execute(fft_pdop_plan);
-        for (int j=0; j<n; j++) {
-            fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j].x - fft_pdop_buffer[j][1] * fft_ma[j].y;
-            fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j].y + fft_pdop_buffer[j][1] * fft_ma[j].x;
-            //cout << "(" << fft_mult_buffer[j][0] << "," << fft_mult_buffer[j][1] << ") ";
-        }
-        //cout << endl;
-        fftw_execute(ifft_conv_plan);
-        for (int j=0; j<n; j++) {
-            pow_[i*n+j] = fft_mult_buffer[j][0]/n;
-            //cout << pow_[i*n+j] << " ";
-        }
-        //cout << endl;
-    }
-    fftw_destroy_plan(ifft_conv_plan);
-    fftw_destroy_plan(fft_pdop_plan);
+    cout << "processing: " << e-bb << endl;
 
-    // Reflectivity
-    double *z, *zdb, *zdr;
-    z = new double[m];
-    zdb = new double[m];
-    zdr = new double[m/2];
-    for (int i=0; i<m; i++) {
-        for (int j=1; j<n; j++) {
-            pow_[i*n] += pow_[i*n+j];
-        }
-        //cout << pow_[i*n] << endl;
-    }
-    for (int i=0; i<m/2; i++) {
-        z[i] = pow(i*k_rangeres, 2.0) * k_calib * pow_[i*n];
-        z[i+m/2] = pow(i*k_rangeres, 2.0) * k_calib * pow_[(i+m/2)*n];
-        zdb[i] = 10 * log10(z[i]);
-        //zdb[i+m/2] = 10 * log10(z[i+m/2]);
-        zdr[i] = 10 * (log10(pow_[i*n])-log10(pow_[(i+m/2)*n]));
-        cout << zdb[i] << " " << zdr[i] << endl;
-    }
+    gettimeofday(&tb, NULL);
+
+    cudaMemcpy(result, d_result, (m/2)*RESULT_SIZE*sizeof(double), cudaMemcpyDeviceToHost);
+
+    gettimeofday(&te, NULL);
+    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+
+    cout << "memcpy to host: " << e-bb << endl;
+
+    // for (int i=0; i<m/2; i++) {
+    //     for (int j=0; j<RESULT_SIZE; j++) {
+    //         cout << result[i*RESULT_SIZE+j] << " ";
+    //     }
+    //     cout << endl;
+    // }
 
     cudaFree(d_hamming);
-    //cudaFree(d_ma);
-    cudaFree(d_iq);
-    cudaFree(d_shift);
+    cudaFree(d_ma);
+    cudaFree(d_iqhh);
+    cudaFree(d_iqvv);
 
-    delete iqhalf;
-
-    delete zdr;
-    delete zdb;
-    delete z;
-
-    fftw_free(fft_mult_buffer);
-    fftw_free(fft_pdop_buffer);
-
-    delete pow_;
-    delete iq;
+    delete iqhh;
+    delete iqvv;
 
     return 0;
 }
+
+    // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+
+    // for (int i=0; i<m; i++) {
+    //     for (int j=0; j<n; j++) {
+    //         cout << "(" << iqhh[i*n+j].x << "," << iqhh[i*n+j].y << ") ";
+    //     }
+    //     cout << endl;
+    // }
+    // // for (int i=0; i<m; i++) {
+    // //     for (int j=0; j<n; j++) {
+    // //         cout << iqvv[i*n+j].x << " ";
+    // //     }
+    // //     cout << endl;
+    // // }
+    // exit(0);
