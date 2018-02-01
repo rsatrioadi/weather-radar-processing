@@ -154,12 +154,25 @@ __global__ void __calcresult(cuDoubleComplex *hh, cuDoubleComplex *vv, double *o
     out[i*RESULT_SIZE+1] = zdr;
 }
 
+void tick(timeval *begin) {
+    gettimeofday(begin, NULL);
+}
+
+void tock(timeval *begin, timeval *end, string caption) {
+    unsigned long long bb, e;
+
+    gettimeofday(end, NULL);
+    bb = (unsigned long long)(begin->tv_sec) * 1000000 + (unsigned long long)(begin->tv_usec) / 1;
+    e = (unsigned long long)(end->tv_sec) * 1000000 + (unsigned long long)(end->tv_usec) / 1;
+
+    cout << caption << ": " << e-bb << endl;
+}
+
 int main(int argc, char **argv) {
 
     struct timeval tb, te;
-    unsigned long long bb, e;
 
-    gettimeofday(&tb, NULL);
+    tick(&tb);
 
     cuDoubleComplex *iqhh, *iqvv;
     double *result;
@@ -217,6 +230,25 @@ int main(int argc, char **argv) {
     cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ma, fft_ma, n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
 
+    // CUFFT init
+    cufftHandle fft_range_handle;
+    int rank = 1;                   // --- 1D FFTs
+    int nn[] = { m };               // --- Size of the Fourier transform
+    int istride = n, ostride = n;   // --- Distance between two successive input/output elements
+    int idist = 1, odist = 1;       // --- Distance between batches
+    int inembed[] = { 0 };          // --- Input size with pitch (ignored for 1D transforms)
+    int onembed[] = { 0 };          // --- Output size with pitch (ignored for 1D transforms)
+    int batch = n;                  // --- Number of batched executions
+    cufftPlanMany(&fft_range_handle, rank, nn, 
+                  inembed, istride, idist,
+                  onembed, ostride, odist, CUFFT_Z2Z, batch);
+
+    cufftHandle fft_doppler_handle;
+    cufftPlan1d(&fft_doppler_handle, n, CUFFT_Z2Z, m);
+
+    cufftHandle fft_pdop_handle;
+    cufftPlan1d(&fft_pdop_handle, n, CUFFT_Z2Z, m/2);
+
     // Read 1 sector data
     for (int i=0; i<m; i++) {
         for (int j=0; j<n; j++) {
@@ -231,83 +263,117 @@ int main(int argc, char **argv) {
         }
     }
 
-    gettimeofday(&te, NULL);
-    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+    tock(&tb, &te, "initialization");
 
-    cout << "initialization: " << e-bb << endl;
-
-    gettimeofday(&tb, NULL);
+    tick(&tb);
 
     cudaMemcpy(d_iqhh, iqhh, m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
     cudaMemcpy(d_iqvv, iqvv, m*n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
 
-    gettimeofday(&te, NULL);
-    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+    tock(&tb, &te, "memcpy to device");
 
-    cout << "memcpy to device: " << e-bb << endl;
-
-    gettimeofday(&tb, NULL);
+    tick(&tb);
 
     // apply Hamming coefficients
     __apply_hamming<<<m,n>>>(d_iqhh, d_hamming);
     __apply_hamming<<<m,n>>>(d_iqvv, d_hamming);
 
+    tock(&tb, &te, "apply hamming");
+
+    tick(&tb);
+
     // FFT range profile
-    cufftHandle fft_range_handle;
-    int rank = 1;                   // --- 1D FFTs
-    int nn[] = { m };               // --- Size of the Fourier transform
-    int istride = n, ostride = n;   // --- Distance between two successive input/output elements
-    int idist = 1, odist = 1;       // --- Distance between batches
-    int inembed[] = { 0 };          // --- Input size with pitch (ignored for 1D transforms)
-    int onembed[] = { 0 };          // --- Output size with pitch (ignored for 1D transforms)
-    int batch = n;                  // --- Number of batched executions
-    cufftPlanMany(&fft_range_handle, rank, nn, 
-                  inembed, istride, idist,
-                  onembed, ostride, odist, CUFFT_Z2Z, batch);
     cufftExecZ2Z(fft_range_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
     cufftExecZ2Z(fft_range_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
 
+    tock(&tb, &te, "fft range");
+
+    tick(&tb);
+
     // FFT+shift Doppler profile
-    cufftHandle fft_doppler_handle;
     __sumcomplex<<<m,n>>>(d_iqhh, d_sum);
     __avgconj<<<m,n>>>(d_iqhh, d_sum);
     __sumcomplex<<<m,n>>>(d_iqvv, d_sum);
     __avgconj<<<m,n>>>(d_iqvv, d_sum);
-    cufftPlan1d(&fft_doppler_handle, n, CUFFT_Z2Z, m);
+
+    tock(&tb, &te, "sum reduction & average conjugate");
+
+    tick(&tb);
+
     cufftExecZ2Z(fft_doppler_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
     cufftExecZ2Z(fft_doppler_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+
+    tock(&tb, &te, "fft doppler");
+
+    tick(&tb);
+
     __conjugate<<<m,n>>>(d_iqhh);
     __conjugate<<<m,n>>>(d_iqvv);
+
+    tock(&tb, &te, "conjugate");
+
+    tick(&tb);
+
     __shift<<<m,n/2>>>(d_iqhh, n);
     __shift<<<m,n/2>>>(d_iqvv, n);
+
+    tock(&tb, &te, "fftshift");
+
+    tick(&tb);
+
     __trim<<<m,2>>>(d_iqhh, n);
     __trim<<<m,2>>>(d_iqvv, n);
+
+    tock(&tb, &te, "clipping");
+
+    tick(&tb);
 
     // Get absolute value
     __abssqr<<<m/2,n>>>(d_iqhh, n);
     __abssqr<<<m/2,n>>>(d_iqvv, n);
 
+    tock(&tb, &te, "absolute squared");
+
+    tick(&tb);
+
     // FFT PDOP
-    cufftHandle fft_pdop_handle;
-    cufftPlan1d(&fft_pdop_handle, n, CUFFT_Z2Z, m/2);
     cufftExecZ2Z(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
     cufftExecZ2Z(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+
+    tock(&tb, &te, "fft pdop");
+
+    tick(&tb);
 
     // Apply MA coefficients
     __apply_ma<<<m/2,n>>>(d_iqhh, d_ma);
     __apply_ma<<<m/2,n>>>(d_iqvv, d_ma);
 
+    tock(&tb, &te, "apply ma");
+
+    tick(&tb);
+
     // Inverse FFT
     cufftExecZ2Z(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_INVERSE);
     cufftExecZ2Z(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_INVERSE);
+
+    tock(&tb, &te, "inverse fft");
+
+    tick(&tb);
+
     __scale_real<<<m/2,n>>>(d_iqhh);
     __scale_real<<<m/2,n>>>(d_iqvv);
+
+    tock(&tb, &te, "ifft rescale");
+
+    tick(&tb);
 
     // Sum
     __sum_inplace<<<m/2,n>>>(d_iqhh);
     __sum_inplace<<<m/2,n>>>(d_iqvv);
+
+    tock(&tb, &te, "sum reduction");
+
+    tick(&tb);
 
     // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
     // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
@@ -323,21 +389,13 @@ int main(int argc, char **argv) {
     // Calculate ZdB, Zdr
     __calcresult<<<m/2,1>>>(d_iqhh, d_iqvv, d_result, n);
 
-    gettimeofday(&te, NULL);
-    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+    tock(&tb, &te, "result calc");
 
-    cout << "processing: " << e-bb << endl;
-
-    gettimeofday(&tb, NULL);
+    tick(&tb);
 
     cudaMemcpy(result, d_result, (m/2)*RESULT_SIZE*sizeof(double), cudaMemcpyDeviceToHost);
 
-    gettimeofday(&te, NULL);
-    bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-    e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
-
-    cout << "memcpy to host: " << e-bb << endl;
+    tock(&tb, &te, "memcpy to host");
 
     // for (int i=0; i<m/2; i++) {
     //     for (int j=0; j<RESULT_SIZE; j++) {
