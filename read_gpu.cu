@@ -230,8 +230,11 @@ int main(int argc, char **argv) {
     cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ma, fft_ma, n*sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
 
-    // CUFFT init
+    // CUFFT initialization
     cufftHandle fft_range_handle;
+    cufftHandle fft_doppler_handle;
+    cufftHandle fft_pdop_handle;
+
     int rank = 1;                   // --- 1D FFTs
     int nn[] = { m };               // --- Size of the Fourier transform
     int istride = n, ostride = n;   // --- Distance between two successive input/output elements
@@ -239,14 +242,11 @@ int main(int argc, char **argv) {
     int inembed[] = { 0 };          // --- Input size with pitch (ignored for 1D transforms)
     int onembed[] = { 0 };          // --- Output size with pitch (ignored for 1D transforms)
     int batch = n;                  // --- Number of batched executions
+
     cufftPlanMany(&fft_range_handle, rank, nn, 
                   inembed, istride, idist,
                   onembed, ostride, odist, CUFFT_Z2Z, batch);
-
-    cufftHandle fft_doppler_handle;
     cufftPlan1d(&fft_doppler_handle, n, CUFFT_Z2Z, m);
-
-    cufftHandle fft_pdop_handle;
     cufftPlan1d(&fft_pdop_handle, n, CUFFT_Z2Z, m/2);
 
     // Read 1 sector data
@@ -317,7 +317,7 @@ int main(int argc, char **argv) {
     __shift<<<m,n/2>>>(d_iqhh, n);
     __shift<<<m,n/2>>>(d_iqvv, n);
 
-    tock(&tb, &te, "fftshift");
+    tock(&tb, &te, "ffstshift");
 
     tick(&tb);
 
@@ -332,7 +332,7 @@ int main(int argc, char **argv) {
     __abssqr<<<m/2,n>>>(d_iqhh, n);
     __abssqr<<<m/2,n>>>(d_iqvv, n);
 
-    tock(&tb, &te, "absolute squared");
+    tock(&tb, &te, "absloute squared");
 
     tick(&tb);
 
@@ -356,7 +356,7 @@ int main(int argc, char **argv) {
     cufftExecZ2Z(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_INVERSE);
     cufftExecZ2Z(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_INVERSE);
 
-    tock(&tb, &te, "inverse fft");
+    tock(&tb, &te, "ifft");
 
     tick(&tb);
 
