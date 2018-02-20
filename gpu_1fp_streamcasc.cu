@@ -150,6 +150,34 @@ __global__ void __sum_v3(cuFloatComplex *in, cuFloatComplex *out, int offset) {
     }
 }
 
+__global__ void __sum_v4(cuFloatComplex *in, cuFloatComplex *out, int offset) {
+    const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+    extern __shared__ cuFloatComplex sdata[];
+
+    #pragma unroll
+    for (unsigned int d=0; d<2; d++) {
+        sdata[j+n*d] = make_cuFloatComplex(in[offset+i*n+j+n*d].x, in[offset+i*n+j+n*d].y);
+    }
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            #pragma unroll
+            for (unsigned int d=0; d<2; d++) {
+                sdata[j+n*d] = cuCaddf(sdata[j+n*d], sdata[j+n*d+s]);
+            }
+        }
+        __syncthreads();
+    }
+
+    if(j==0) {
+        #pragma unroll
+        for (unsigned int d=0; d<2; d++) {
+            out[i*n+n*d] = sdata[j+n*d];
+        }
+    }
+}
+
 __global__ void __avgconj(cuFloatComplex *inout, cuFloatComplex *sum, int offset) {
     const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
 
@@ -242,6 +270,34 @@ __global__ void __sum_inplace_v3(cuFloatComplex *in, int offset) {
 
     if(j==0) {
         in[i*n] = sdata[j];
+    }
+}
+
+__global__ void __sum_inplace_v4(cuFloatComplex *in, int offset) {
+    const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+    extern __shared__ cuFloatComplex sdata[];
+
+    #pragma unroll
+    for (unsigned int d=0; d<2; d++) {
+        sdata[j+n*d] = make_cuFloatComplex(in[offset+i*n+j+n*d].x, in[offset+i*n+j+n*d].y);
+    }
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            #pragma unroll
+            for (unsigned int d=0; d<2; d++) {
+                sdata[j+n*d] = cuCaddf(sdata[j+n*d], sdata[j+n*d+s]);
+            }
+        }
+        __syncthreads();
+    }
+
+    if(j==0) {
+        #pragma unroll
+        for (unsigned int d=0; d<2; d++) {
+            in[i*n+n*d] = sdata[j+n*d];
+        }
     }
 }
 
@@ -356,8 +412,6 @@ int main(int argc, char **argv) {
 
     float ms; // elapsed time in milliseconds
 
-    sector_id = 0;
-
     // create events and streams
     cudaEvent_t startEvent, stopEvent;
     cudaStream_t stream[NSTREAMS];
@@ -381,69 +435,37 @@ int main(int argc, char **argv) {
     }
 
     cudaEventRecord(startEvent,0);
-    do {
-        for(int stream_id=0; stream_id < NSTREAMS; stream_id++) {
+    tick(&tb);
 
-            // tick(&tb);
+    sector_id = 0;
 
-            // Read 1 sector data
-            // cin >> sector_id;
-
-            sector_id++;
-
-            // int stream_id = sector_id % NSTREAMS;
-            int offset = stream_id * (m*n);
-            int result_offset = stream_id * (m/2)*RESULT_SIZE;
-
-            for (int i=0; i<m; i++) {
-                for (int j=0; j<n; j++) {
-                    // cin >> a >> b;
-                    iqhh[i*n+j] = make_cuFloatComplex(i, j);
-                }
-            }
-            for (int i=0; i<m; i++) {
-                for (int j=0; j<n; j++) {
-                    // cin >> a >> b;
-                    iqvv[i*n+j] = make_cuFloatComplex(i, j);
-                }
-            }
-            memcpy(&p_iqhh[offset], iqhh, m*n*sizeof(cuFloatComplex));
-            memcpy(&p_iqvv[offset], iqvv, m*n*sizeof(cuFloatComplex));
-
-            // tock(&tb, &te, "read");
-
-            // cout << "Processing sector " << sector_id << ", stream " << stream_id << endl;
-
-
-            // for (int i=0; i<m; i++) {
-            //     for (int j=0; j<n; j++) {
-            //         cout << "(" << iqhh[i*n+j].x << "," << iqhh[i*n+j].y << ") ";
-            //     }
-            //     cout << endl;
-            // }
-            // // for (int i=0; i<m; i++) {
-            // //     for (int j=0; j<n; j++) {
-            // //         cout << iqvv[i*n+j].x << " ";
-            // //     }
-            // //     cout << endl;
-            // // }
-            // exit(0);
-            
-            // tick(&tb);
-
-            cudaMemcpyAsync(&d_iqhh[offset], &p_iqhh[offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[stream_id]);
-            cudaMemcpyAsync(&d_iqvv[offset], &p_iqvv[offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[stream_id]); 
-            // break;  
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            // cin >> a >> b;
+            iqhh[i*n+j] = make_cuFloatComplex(i, j);
         }
+    }
+    for (int i=0; i<m; i++) {
+        for (int j=0; j<n; j++) {
+            // cin >> a >> b;
+            iqvv[i*n+j] = make_cuFloatComplex(i, j);
+        }
+    }
+    memcpy(&p_iqhh[0], iqhh, m*n*sizeof(cuFloatComplex));
+    memcpy(&p_iqvv[0], iqvv, m*n*sizeof(cuFloatComplex));
 
-        for(int stream_id=0; stream_id < NSTREAMS; stream_id++) {
+    cudaMemcpyAsync(&d_iqhh[0], &p_iqhh[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]);
+    cudaMemcpyAsync(&d_iqvv[0], &p_iqvv[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]); 
+    
+    do {
+        // for(int stream_id=0; stream_id < NSTREAMS; stream_id++) {
 
             // tick(&tb);
 
             // Read 1 sector data
             // cin >> sector_id;
 
-            // int stream_id = sector_id % NSTREAMS;
+            int stream_id = sector_id % NSTREAMS;
             int offset = stream_id * (m*n);
             int result_offset = stream_id * (m/2)*RESULT_SIZE;
 
@@ -458,10 +480,10 @@ int main(int argc, char **argv) {
 
             // FFT+shift Doppler profile
             // __sum_v2<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, d_sum, offset);
-            __sum_v3<<<m,n,n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, d_sum, offset);
+            __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, d_sum, offset);
             __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqhh, d_sum, offset);
             // __sum_v2<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, d_sum, offset);
-            __sum_v3<<<m,n,n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, d_sum, offset);
+            __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, d_sum, offset);
             __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqvv, d_sum, offset);
 
             cufftExecC2C(fft_doppler_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_FORWARD);
@@ -498,8 +520,8 @@ int main(int argc, char **argv) {
             // Sum
             // __sum_inplace_v2<<<m/4,n,0,stream[stream_id]>>>(d_iqhh, offset);
             // __sum_inplace_v2<<<m/4,n,0,stream[stream_id]>>>(d_iqvv, offset);
-            __sum_inplace_v3<<<m/2,n,n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, offset);
-            __sum_inplace_v3<<<m/2,n,n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, offset);
+            __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, offset);
+            __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, offset);
 
             // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
             // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
@@ -514,23 +536,31 @@ int main(int argc, char **argv) {
 
             // Calculate ZdB, Zdr
             __calcresult<<<1,m/2,0,stream[stream_id]>>>(d_iqhh, d_iqvv, d_result, n, offset, result_offset);
-            // break;
-        }
-        for(int stream_id=0; stream_id < NSTREAMS; stream_id++) {
 
-            // tick(&tb);
+            int next_stream_id = (sector_id+1) % NSTREAMS;
+            int next_offset = next_stream_id * (m*n);
 
-            // Read 1 sector data
-            // cin >> sector_id;
+            #pragma unroll
+            for (int i=0; i<m; i++) {
+                #pragma unroll
+                for (int j=0; j<n; j++) {
+                    // cin >> a >> b;
+                    iqhh[i*n+j] = make_cuFloatComplex(i, j);
+                }
+            }
+            #pragma unroll
+            for (int i=0; i<m; i++) {
+                #pragma unroll
+                for (int j=0; j<n; j++) {
+                    // cin >> a >> b;
+                    iqvv[i*n+j] = make_cuFloatComplex(i, j);
+                }
+            }
+            memcpy(&p_iqhh[next_offset], iqhh, m*n*sizeof(cuFloatComplex));
+            memcpy(&p_iqvv[next_offset], iqvv, m*n*sizeof(cuFloatComplex));
 
-            // int stream_id = sector_id % NSTREAMS;
-            int offset = stream_id * (m*n);
-            int result_offset = stream_id * (m/2)*RESULT_SIZE;
-
-            // cudaDeviceSynchronize();
-            // tock(&tb, &te, "processing");
-
-            // tick(&tb);
+            cudaMemcpyAsync(&d_iqhh[next_offset], &p_iqhh[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]);
+            cudaMemcpyAsync(&d_iqvv[next_offset], &p_iqvv[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
 
             cudaMemcpyAsync(&result[result_offset], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
 
@@ -545,8 +575,12 @@ int main(int argc, char **argv) {
 
             // exit(0);
 
-        }
+            sector_id++;
+
+        // }
     } while(sector_id < 127);
+
+    tock(&tb, &te, "All (us)");
 
     cudaEventRecord(stopEvent, 0);
     cudaEventSynchronize(stopEvent);

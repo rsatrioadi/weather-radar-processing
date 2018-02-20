@@ -123,6 +123,45 @@ __global__ void __sum(cuFloatComplex *in, cuFloatComplex *out) {
     }
 }
 
+__global__ void __sum_v2(cuFloatComplex *in, cuFloatComplex *out) {
+    const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+    #pragma unroll
+    for (unsigned int d=0; d<2; d++) {
+        out[i*n+j+n*d] = make_cuFloatComplex(in[i*n+j+n*d].x, in[i*n+j+n*d].y);
+    }
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            #pragma unroll
+            for (unsigned int d=0; d<2; d++) {
+                out[i*n+j+n*d] = cuCaddf(out[i*n+j+n*d], out[i*n+j+n*d+s]);
+            }
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void __sum_v3(cuFloatComplex *in, cuFloatComplex *out) {
+    const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+    extern __shared__ cuFloatComplex sdata[];
+
+    sdata[j] = make_cuFloatComplex(in[i*n+j].x, in[i*n+j].y);
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            sdata[j] = cuCaddf(sdata[j], sdata[j+s]);
+        }
+        __syncthreads();
+    }
+
+    if(j==0) {
+        out[i*n] = sdata[j];
+    }
+}
+
 __global__ void __sum_inplace(cuFloatComplex *g_idata) {
     const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
     
@@ -133,6 +172,41 @@ __global__ void __sum_inplace(cuFloatComplex *g_idata) {
             g_idata[i*n+j] = cuCaddf(g_idata[i*n+j], g_idata[i*n+j+s]);
         }
         __syncthreads();
+    }
+}
+
+__global__ void __sum_inplace_v2(cuFloatComplex *g_idata) {
+    const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+    
+    // __syncthreads();
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            // g_idata[i] = make_cuFloatComplex(g_idata[i].x+g_idata[i + s].x, 0);
+            #pragma unroll
+            for (unsigned int d=0; d<2; d++) {
+                g_idata[i*n+j+n*d] = cuCaddf(g_idata[i*n+j+n*d], g_idata[i*n+j+n*d+s]);
+            }
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void __sum_inplace_v3(cuFloatComplex *in) {
+    const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+    extern __shared__ cuFloatComplex sdata[];
+
+    sdata[j] = make_cuFloatComplex(in[i*n+j].x, in[i*n+j].y);
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (j < s) {
+            sdata[j] = cuCaddf(sdata[j], sdata[j+s]);
+        }
+        __syncthreads();
+    }
+
+    if(j==0) {
+        in[i*n] = sdata[j];
     }
 }
 
@@ -315,9 +389,9 @@ int main(int argc, char **argv) {
         cufftExecC2C(fft_range_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
 
         // FFT+shift Doppler profile
-        __sum<<<m,n>>>(d_iqhh, d_sum);
+        __sum_v2<<<m/2,n>>>(d_iqhh, d_sum);
         __avgconj<<<m,n>>>(d_iqhh, d_sum);
-        __sum<<<m,n>>>(d_iqvv, d_sum);
+        __sum_v2<<<m/2,n>>>(d_iqvv, d_sum);
         __avgconj<<<m,n>>>(d_iqvv, d_sum);
 
         cufftExecC2C(fft_doppler_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
@@ -352,8 +426,8 @@ int main(int argc, char **argv) {
         __scale_real<<<m/2,n>>>(d_iqvv);
 
         // Sum
-        __sum_inplace<<<m/2,n>>>(d_iqhh);
-        __sum_inplace<<<m/2,n>>>(d_iqvv);
+        __sum_inplace_v2<<<m/4,n,n*sizeof(cuFloatComplex)>>>(d_iqhh);
+        __sum_inplace_v2<<<m/4,n,n*sizeof(cuFloatComplex)>>>(d_iqvv);
 
         // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
         // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
@@ -367,7 +441,7 @@ int main(int argc, char **argv) {
         // exit(0);
 
         // Calculate ZdB, Zdr
-        __calcresult<<<m/2,1>>>(d_iqhh, d_iqvv, d_result, n);
+        __calcresult_v2<<<1,m/2>>>(d_iqhh, d_iqvv, d_result, n);
 
         cudaMemcpy(result, d_result, (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost);
 

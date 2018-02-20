@@ -113,40 +113,41 @@ int main(int argc, char **argv) {
 
     cout << "initialization: " << e-bb << endl;
 
-    sector_id = 0;
+    sector_id = -1;
 
     struct timeval t1, t2;
     gettimeofday(&t1, NULL);
 
     while(sector_id < 126) {
 
-        gettimeofday(&tb, NULL);
+        // gettimeofday(&tb, NULL);
 
         // Read 1 sector data
-        cin >> sector_id;
+        // cin >> sector_id;
+        sector_id++;
         for (int i=0; i<m; i++) {
             for (int j=0; j<n; j++) {
-            	cin >> a >> b;
+            	// cin >> a >> b;
                 //iqhh[i*n+j] = make_cuDoubleComplex(a, b);
-                iqhh[i*n+j][0] = a;
-                iqhh[i*n+j][1] = b;
+                iqhh[i*n+j][0] = i;
+                iqhh[i*n+j][1] = j;
             }
         }
         for (int i=0; i<m; i++) {
             for (int j=0; j<n; j++) {
-                cin >> a >> b;
-                iqvv[i*n+j][0] = a;
-                iqvv[i*n+j][1] = b;
+                // cin >> a >> b;
+                iqvv[i*n+j][0] = j;
+                iqvv[i*n+j][1] = i;
             }
         }
 
-        gettimeofday(&te, NULL);
-        bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-        e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+        // gettimeofday(&te, NULL);
+        // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+        // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
 
-        cout << "read: " << e-bb << endl;
+        // cout << "read: " << e-bb << endl;
 
-        cout << "Processing sector " << sector_id << endl;
+        // cout << "Processing sector " << sector_id << endl;
 
         // for (int i=0; i<m; i++) {
         //     for (int j=0; j<n; j++) {
@@ -162,7 +163,7 @@ int main(int argc, char **argv) {
         // // }
         // exit(0);
         
-        gettimeofday(&tb, NULL);
+        // gettimeofday(&tb, NULL);
 
         // apply Hamming coefficients
         for (int i=0; i<m; i++) {
@@ -374,24 +375,24 @@ int main(int argc, char **argv) {
             z[i] = pow(i*k_rangeres, 2.0) * k_calib * powhh[i*n];
             zdb[i] = 10 * log10(z[i]);
             zdr[i] = 10 * (log10(powhh[i*n])-log10(powvv[i*n]));
-            cout << zdb[i] << " " << zdr[i] << endl;
+            // cout << zdb[i] << " " << zdr[i] << endl;
         }
 
         fftwf_free(fft_mult_buffer);
         fftwf_free(fft_pdop_buffer);
 
-        gettimeofday(&te, NULL);
-        bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
-        e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
+        // gettimeofday(&te, NULL);
+        // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
+        // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
 
-        cout << "time: " << e-bb << endl;
+        // cout << "time: " << e-bb << endl;
     }
 
     gettimeofday(&t2, NULL);
-    float begin = ((double)t1.tv_sec) * 1000.0 + ((double)t1.tv_usec) / 1000.0;
-    float end = ((double)t2.tv_sec) * 1000.0 + ((double)t2.tv_usec) / 1000.0;
+    bb = (unsigned long long)(t1.tv_sec) * 1000000 + (unsigned long long)(t1.tv_usec) / 1;
+    e = (unsigned long long)(t2.tv_sec) * 1000000 + (unsigned long long)(t2.tv_usec) / 1;
 
-    cout << "All (ms): " << end-begin << endl;
+    cout << "All (us): " << e-bb << endl;
 
     delete zdr;
     delete zdb;

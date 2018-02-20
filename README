@@ -1,0 +1,8 @@
+CODE; REMARKS; EXEC_TIME
+gpu_1fp; baseline gpu implementation; ;
+gpu_1fp_resblock; changed result calculation to use 1 block only; ;
+gpu_1fp_ilp; reduction kernel uses instruction-level paralellism; ;
+gpu_1fp_shmem; reduction kernel uses shared memory; ;
+gpu_1fp_ilpshmem; reduction kernel uses both ilp and shmem; ;
+gpu_1fp_const; ma coef stored in constant memory; ;
+gpu_1fp_streamcasc; overlap memcpy & kernel exec; ;

@@ -367,7 +367,7 @@ int main(int argc, char **argv) {
         // exit(0);
 
         // Calculate ZdB, Zdr
-        __calcresult<<<m/2,1>>>(d_iqhh, d_iqvv, d_result, n);
+        __calcresult_v2<<<1,m/2>>>(d_iqhh, d_iqvv, d_result, n);
 
         cudaMemcpy(result, d_result, (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost);
 
