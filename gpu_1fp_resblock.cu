@@ -150,7 +150,7 @@ __global__ void __scale_real(cuFloatComplex *inout) {
     inout[i*n+j] = make_cuFloatComplex(inout[i*n+j].x/n, 0);
 }
 
-__global__ void __calcresult(cuFloatComplex *hh, cuFloatComplex *vv, float *out, int n) {
+__global__ void __calcresult(cuFloatComplex *hh, cuFloatComplex *vv, cuFloatComplex *hv, float *out, int n) {
     const unsigned int i = blockIdx.x;
 
     float z = pow(i*k_rangeres, 2.0) * k_calib * hh[i*n].x;
@@ -160,7 +160,7 @@ __global__ void __calcresult(cuFloatComplex *hh, cuFloatComplex *vv, float *out,
     out[i*RESULT_SIZE+1] = zdr;
 }
 
-__global__ void __calcresult_v2(cuFloatComplex *hh, cuFloatComplex *vv, float *out, int n) {
+__global__ void __calcresult_v2(cuFloatComplex *hh, cuFloatComplex *vv, cuFloatComplex *hv, float *out, int n) {
     const unsigned int i = threadIdx.x;
 
     float z = pow(i*k_rangeres, 2.0) * k_calib * hh[i*n].x;
@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
 
     tick(&tb);
 
-    cuFloatComplex *iqhh, *iqvv;
+    cuFloatComplex *iqhh, *iqvv, *iqhv;
     float *result;
     int sector_id;
 
@@ -202,6 +202,7 @@ int main(int argc, char **argv) {
 
     iqhh = new cuFloatComplex[m*n];
     iqvv = new cuFloatComplex[m*n];
+    iqhv = new cuFloatComplex[m*n];
     result = new float[(m/2)*RESULT_SIZE];
 
     float a, b;
@@ -233,7 +234,7 @@ int main(int argc, char **argv) {
     // Device buffers
     /*__constant__*/ float *d_hamming;
     /*__constant__*/ cuFloatComplex *d_ma;
-    cuFloatComplex *d_iqhh, *d_iqvv;
+    cuFloatComplex *d_iqhh, *d_iqvv, *d_iqhv;
     cuFloatComplex *d_sum;
     float *d_result;
     //float *d_powhh, *d_powvv;
@@ -242,6 +243,7 @@ int main(int argc, char **argv) {
     cudaMalloc(&d_ma, n*sizeof(cuFloatComplex));
     cudaMalloc(&d_iqhh, m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_iqvv, m*n*sizeof(cuFloatComplex));
+    cudaMalloc(&d_iqhv, m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_sum, m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_result, (m/2)*RESULT_SIZE*sizeof(float));
 
@@ -289,7 +291,7 @@ int main(int argc, char **argv) {
 
         // Read 1 sector data
         // cin >> sector_id;
-        // sector_id++;
+        sector_id++;
         for (int i=0; i<m; i++) {
             for (int j=0; j<n; j++) {
                 // cin >> a >> b;
@@ -302,58 +304,79 @@ int main(int argc, char **argv) {
                 iqvv[i*n+j] = make_cuFloatComplex(j, i);
             }
         }
+        for (int i=0; i<m; i++) {
+            for (int j=0; j<n; j++) {
+                // cin >> a >> b;
+                iqhv[i*n+j] = make_cuFloatComplex(j, i);
+            }
+        }
 
         cudaMemcpy(d_iqhh, iqhh, m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
         cudaMemcpy(d_iqvv, iqvv, m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_iqhv, iqhv, m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
 
         // apply Hamming coefficients
         __apply_hamming<<<m,n>>>(d_iqhh, d_hamming);
         __apply_hamming<<<m,n>>>(d_iqvv, d_hamming);
+        __apply_hamming<<<m,n>>>(d_iqhv, d_hamming);
 
         // FFT range profile
         cufftExecC2C(fft_range_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
         cufftExecC2C(fft_range_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+        cufftExecC2C(fft_range_handle, d_iqhv, d_iqhv, CUFFT_FORWARD);
 
         // FFT+shift Doppler profile
         __sum<<<m,n>>>(d_iqhh, d_sum);
         __avgconj<<<m,n>>>(d_iqhh, d_sum);
         __sum<<<m,n>>>(d_iqvv, d_sum);
         __avgconj<<<m,n>>>(d_iqvv, d_sum);
+        __sum<<<m,n>>>(d_iqhv, d_sum);
+        __avgconj<<<m,n>>>(d_iqhv, d_sum);
 
         cufftExecC2C(fft_doppler_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
         cufftExecC2C(fft_doppler_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+        cufftExecC2C(fft_doppler_handle, d_iqhv, d_iqhv, CUFFT_FORWARD);
 
         __conjugate<<<m,n>>>(d_iqhh);
         __conjugate<<<m,n>>>(d_iqvv);
+        __conjugate<<<m,n>>>(d_iqhv);
 
         __shift<<<m,n/2>>>(d_iqhh, n);
         __shift<<<m,n/2>>>(d_iqvv, n);
+        __shift<<<m,n/2>>>(d_iqhv, n);
 
         __clip<<<m,2>>>(d_iqhh, n);
         __clip<<<m,2>>>(d_iqvv, n);
+        __clip<<<m,2>>>(d_iqhv, n);
 
         // Get absolute value
         __abssqr<<<m/2,n>>>(d_iqhh, n);
         __abssqr<<<m/2,n>>>(d_iqvv, n);
+        __abssqr<<<m/2,n>>>(d_iqhv, n);
 
         // FFT PDOP
         cufftExecC2C(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_FORWARD);
         cufftExecC2C(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_FORWARD);
+        cufftExecC2C(fft_pdop_handle, d_iqhv, d_iqhv, CUFFT_FORWARD);
 
         // Apply MA coefficients
         __apply_ma<<<m/2,n>>>(d_iqhh, d_ma);
         __apply_ma<<<m/2,n>>>(d_iqvv, d_ma);
+        __apply_ma<<<m/2,n>>>(d_iqhv, d_ma);
 
         // Inverse FFT
         cufftExecC2C(fft_pdop_handle, d_iqhh, d_iqhh, CUFFT_INVERSE);
         cufftExecC2C(fft_pdop_handle, d_iqvv, d_iqvv, CUFFT_INVERSE);
+        cufftExecC2C(fft_pdop_handle, d_iqhv, d_iqhv, CUFFT_INVERSE);
 
         __scale_real<<<m/2,n>>>(d_iqhh);
         __scale_real<<<m/2,n>>>(d_iqvv);
+        __scale_real<<<m/2,n>>>(d_iqhv);
 
         // Sum
         __sum_inplace<<<m/2,n>>>(d_iqhh);
         __sum_inplace<<<m/2,n>>>(d_iqvv);
+        __sum_inplace<<<m/2,n>>>(d_iqhv);
 
         // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
         // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
@@ -367,7 +390,7 @@ int main(int argc, char **argv) {
         // exit(0);
 
         // Calculate ZdB, Zdr
-        __calcresult_v2<<<1,m/2>>>(d_iqhh, d_iqvv, d_result, n);
+        __calcresult_v2<<<1,m/2>>>(d_iqhh, d_iqvv, d_iqhv, d_result, n);
 
         cudaMemcpy(result, d_result, (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -394,9 +417,11 @@ int main(int argc, char **argv) {
     cudaFree(d_ma);
     cudaFree(d_iqhh);
     cudaFree(d_iqvv);
+    cudaFree(d_iqhv);
 
     delete[] iqhh;
     delete[] iqvv;
+    delete[] iqhv;
 
     return 0;
 }

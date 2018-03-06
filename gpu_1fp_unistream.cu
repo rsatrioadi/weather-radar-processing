@@ -200,6 +200,17 @@ __global__ void __shift(cuFloatComplex *inout, int n, int offset) {
     inout[offset+i*n+(j+n/2)] = temp;
 }
 
+__global__ void __conjshift(cuFloatComplex *inout, int n, int offset) {
+    const unsigned int i = blockIdx.x, j = threadIdx.x;
+
+    cuFloatComplex t1 = inout[offset+i*n+j];
+    cuFloatComplex t2 = inout[offset+i*n+(j+n/2)];
+    t1.y *= -1;
+    t2.y *= -1;
+    inout[offset+i*n+j] = t2;
+    inout[offset+i*n+(j+n/2)] = t1;
+}
+
 __global__ void __clip(cuFloatComplex *inout, int n, int offset) {
     const unsigned int i = blockIdx.x, j = n-threadIdx.x-1;
     inout[offset+i*n+j] = make_cuFloatComplex(0, 0);
@@ -510,13 +521,13 @@ int main(int argc, char **argv) {
             cufftExecC2C(fft_doppler_handle[stream_id], &d_iqvv[offset], &d_iqvv[offset], CUFFT_FORWARD);
             cufftExecC2C(fft_doppler_handle[stream_id], &d_iqhv[offset], &d_iqhv[offset], CUFFT_FORWARD);
 
-            __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhh, offset);
-            __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqvv, offset);
-            __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhv, offset);
+            // __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhh, offset);
+            // __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqvv, offset);
+            // __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhv, offset);
 
-            __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqhh, n, offset);
-            __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqvv, n, offset);
-            __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqhv, n, offset);
+            __conjshift<<<m,n/2,0,stream[stream_id]>>>(d_iqhh, n, offset);
+            __conjshift<<<m,n/2,0,stream[stream_id]>>>(d_iqvv, n, offset);
+            __conjshift<<<m,n/2,0,stream[stream_id]>>>(d_iqhv, n, offset);
 
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvv, n, offset);

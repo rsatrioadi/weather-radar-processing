@@ -3,7 +3,8 @@
 #include <cuda.h>
 #include <cuComplex.h>
 #include <fftw3.h>
-#include <sys/time.h>
+#include <sys/time.h>    
+// #include <fstream>
 
 using namespace std;
 
@@ -62,8 +63,8 @@ int main(int argc, char **argv) {
     gettimeofday(&tb, NULL);
 
     //cuDoubleComplex *iqhh, *iqvv;
-    fftwf_complex *iqhh, *iqvv;
-    float *powhh, *powvv;
+    fftwf_complex *iqhh, *iqvv, *iqhv;
+    float *powhh, *powvv, *powhv;
     int sector_id;
 
     const int m = 1024; // cell
@@ -78,9 +79,11 @@ int main(int argc, char **argv) {
     //iqvv = new cuDoubleComplex[m*n];
     iqhh = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
     iqvv = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
+    iqhv = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
 
     powhh = new float[(m/2)*n];
     powvv = new float[(m/2)*n];
+    powhv = new float[(m/2)*n];
 
     float a, b;
 
@@ -113,12 +116,14 @@ int main(int argc, char **argv) {
 
     cout << "initialization: " << e-bb << endl;
 
+    // ofstream myFile;
+    // myFile.open("out/cpu.bin", ios::out | ios::binary);
     sector_id = -1;
 
     struct timeval t1, t2;
     gettimeofday(&t1, NULL);
 
-    while(sector_id < 126) {
+    while(sector_id < 127) {
 
         // gettimeofday(&tb, NULL);
 
@@ -138,6 +143,13 @@ int main(int argc, char **argv) {
                 // cin >> a >> b;
                 iqvv[i*n+j][0] = j;
                 iqvv[i*n+j][1] = i;
+            }
+        }
+        for (int i=0; i<m; i++) {
+            for (int j=0; j<n; j++) {
+                // cin >> a >> b;
+                iqhv[i*n+j][0] = i;
+                iqhv[i*n+j][1] = i;
             }
         }
 
@@ -179,6 +191,10 @@ int main(int argc, char **argv) {
                 // VV
                 iqvv[i*n+j][0] *= hamming_coef[i*n+j];
                 iqvv[i*n+j][1] *= hamming_coef[i*n+j];
+
+                // HV
+                iqhv[i*n+j][0] *= hamming_coef[i*n+j];
+                iqhv[i*n+j][1] *= hamming_coef[i*n+j];
             }
         }
 
@@ -212,6 +228,17 @@ int main(int argc, char **argv) {
             for (int i=0; i<m; i++) {
                 iqvv[i*n+j][0] = fft_range_buffer[i][0];
                 iqvv[i*n+j][1] = fft_range_buffer[i][1];
+            }
+
+            // VV
+            for (int i=0; i<m; i++) {
+                fft_range_buffer[i][0] = iqhv[i*n+j][0];
+                fft_range_buffer[i][1] = iqhv[i*n+j][1];
+            }
+            fftwf_execute(fft_range_plan);
+            for (int i=0; i<m; i++) {
+                iqhv[i*n+j][0] = fft_range_buffer[i][0];
+                iqhv[i*n+j][1] = fft_range_buffer[i][1];
             }
         }
         fftwf_destroy_plan(fft_range_plan);
@@ -286,6 +313,35 @@ int main(int argc, char **argv) {
             iqvv[i*n+(n-1)][1] = 0;
             iqvv[i*n+(n-2)][0] = 0;
             iqvv[i*n+(n-2)][1] = 0;
+
+            // HV
+            avgi = 0; avgq = 0;
+            for (int j=0; j<n; j++) {
+                avgi += iqhv[i*n+j][0];
+                avgq += iqhv[i*n+j][1];
+            }
+            avgi /= n;
+            avgq /= n;
+            for (int j=0; j<n; j++) {
+                fft_doppler_buffer[j][0] = (iqhv[i*n+j][0] - avgi);
+                fft_doppler_buffer[j][1] = (iqhv[i*n+j][1] - avgq) * -1;
+            }
+            fftwf_execute(fft_doppler_plan);
+
+            // for (int j=0; j<n; j++) {
+            //     cout << "(" << fft_doppler_buffer[j][0] << "," << fft_doppler_buffer[j][1] << ") ";
+            // }
+            // cout << endl;
+            for (int j=0; j<n/2; j++) {
+                iqhv[i*n+j][0] = fft_doppler_buffer[j+n/2][0];
+                iqhv[i*n+j][1] = fft_doppler_buffer[j+n/2][1] * -1;
+                iqhv[i*n+j+n/2][0] = fft_doppler_buffer[j][0];
+                iqhv[i*n+j+n/2][1] = fft_doppler_buffer[j][1] * -1;
+            }
+            iqhv[i*n+(n-1)][0] = 0;
+            iqhv[i*n+(n-1)][1] = 0;
+            iqhv[i*n+(n-2)][0] = 0;
+            iqhv[i*n+(n-2)][1] = 0;
         }
         fftwf_destroy_plan(fft_doppler_plan);
         fftwf_free(fft_doppler_buffer);
@@ -358,6 +414,28 @@ int main(int argc, char **argv) {
             }
             //cout << endl;
         }
+        for (int i=0; i<m/2; i++) {
+            // HV
+            for (int j=0; j<n; j++) {
+                fft_pdop_buffer[j][0] = iqhv[i*n+j][0] * iqhv[i*n+j][0] + iqhv[i*n+j][1] * iqhv[i*n+j][1];
+                fft_pdop_buffer[j][1] = 0;
+                // cout << fft_pdop_buffer[j][0] << " ";
+            }
+            // cout << endl;
+            fftwf_execute(fft_pdop_plan);
+            for (int j=0; j<n; j++) {
+                fft_mult_buffer[j][0] = fft_pdop_buffer[j][0] * fft_ma[j][0] - fft_pdop_buffer[j][1] * fft_ma[j][1];
+                fft_mult_buffer[j][1] = fft_pdop_buffer[j][0] * fft_ma[j][1] + fft_pdop_buffer[j][1] * fft_ma[j][0];
+                // cout << "(" << fft_pdop_buffer[j][0] << "," << fft_pdop_buffer[j][1] << ") ";
+            }
+            // cout << endl;
+            fftwf_execute(ifft_conv_plan);
+            for (int j=0; j<n; j++) {
+                powhv[i*n+j] = fft_mult_buffer[j][0]/n;
+                //cout << powhv[i*n+j] << " ";
+            }
+            //cout << endl;
+        }
         fftwf_destroy_plan(ifft_conv_plan);
         fftwf_destroy_plan(fft_pdop_plan);
         //fftwf_free(fft_pdop_buffer);
@@ -370,11 +448,14 @@ int main(int argc, char **argv) {
             for (int j=1; j<n; j++) {
                 powhh[i*n] += powhh[i*n+j];
                 powvv[i*n] += powvv[i*n+j];
+                powhv[i*n] += powhv[i*n+j];
             }
             //cout << powhh[i*n] << endl;
             z[i] = pow(i*k_rangeres, 2.0) * k_calib * powhh[i*n];
             zdb[i] = 10 * log10(z[i]);
             zdr[i] = 10 * (log10(powhh[i*n])-log10(powvv[i*n]));
+            // myFile.write((char*)&zdb[i], sizeof(float));
+            // myFile.write((char*)&zdr[i], sizeof(float));
             // cout << zdb[i] << " " << zdr[i] << endl;
         }
 
@@ -387,6 +468,7 @@ int main(int argc, char **argv) {
 
         // cout << "time: " << e-bb << endl;
     }
+    // myFile.close();
 
     gettimeofday(&t2, NULL);
     bb = (unsigned long long)(t1.tv_sec) * 1000000 + (unsigned long long)(t1.tv_usec) / 1;
@@ -401,9 +483,12 @@ int main(int argc, char **argv) {
     fftwf_free(fft_ma);
 
     delete powhh;
+    delete powvv;
+    delete powhv;
 
     //delete iqvv;
     //delete iqhh;
+    fftwf_free(iqhv);
     fftwf_free(iqvv);
     fftwf_free(iqhh);
 
