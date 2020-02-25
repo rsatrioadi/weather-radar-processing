@@ -6,9 +6,12 @@
 #include <cufft.h>
 #include <sys/time.h>
 #include <assert.h>  
+#include "sector.h"  
+#include "udp_client_server.h"
 // #include <fstream>
 
 using namespace std;
+using namespace udp_client_server;
 
 #define k_rangeres 30
 #define k_calib 1941.05
@@ -307,7 +310,7 @@ __global__ void __sum_inplace_v4(cuFloatComplex *in, int offset) {
     }
 }
 
-__global__ void __calcresult_v2(cuFloatComplex *hh, cuFloatComplex *vv, cuFloatComplex *hv, float *out, int n, int offset, int result_offset) {
+__global__ void __calcresult_v2(cuFloatComplex *hh, cuFloatComplex *vv, cuFloatComplex *vh, float *out, int n, int offset, int result_offset) {
     const unsigned int i = threadIdx.x;
 
     float z = pow(i*k_rangeres, 2.0) * k_calib * hh[offset+i*n].x;
@@ -331,6 +334,8 @@ void tock(timeval *begin, timeval *end, string caption) {
     cout << caption << ": " << e-bb << endl;
 }
 
+#define NUM_BYTES_PER_SAMPLE (3*2*2)
+
 int main(int argc, char **argv) {
     ios_base::sync_with_stdio(false);
 
@@ -343,7 +348,7 @@ int main(int argc, char **argv) {
 
     tick(&tb);
 
-    cuFloatComplex *iqhh, *iqvv, *iqhv, *p_iqhh, *p_iqvv, *p_iqhv;
+    cuFloatComplex *iqhh, *iqvv, *iqvh, *p_iqhh, *p_iqvv, *p_iqvh;
     float *result;
     int sector_id;
 
@@ -354,13 +359,11 @@ int main(int argc, char **argv) {
 
     iqhh = new cuFloatComplex[m*n];
     iqvv = new cuFloatComplex[m*n];
-    iqhv = new cuFloatComplex[m*n];
+    iqvh = new cuFloatComplex[m*n];
     cudaMallocHost((void**)&p_iqhh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMallocHost((void**)&p_iqvv, NSTREAMS*m*n*sizeof(cuFloatComplex));
-    cudaMallocHost((void**)&p_iqhv, NSTREAMS*m*n*sizeof(cuFloatComplex));
+    cudaMallocHost((void**)&p_iqvh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     result = new float[NSTREAMS*(m/2)*RESULT_SIZE];
-
-    float a, b;
 
     // Generate Hamming coefficients
     const float *hamming_coef = generate_hamming_coef(m, n);
@@ -388,7 +391,7 @@ int main(int argc, char **argv) {
 
     // Device buffers
     /*__constant__*/ float *d_hamming;
-    cuFloatComplex *d_iqhh, *d_iqvv, *d_iqhv;
+    cuFloatComplex *d_iqhh, *d_iqvv, *d_iqvh;
     cuFloatComplex *d_sum;
     float *d_result;
     //float *d_powhh, *d_powvv;
@@ -397,7 +400,7 @@ int main(int argc, char **argv) {
     // cudaMalloc(&d_ma, n*sizeof(cuFloatComplex));
     cudaMalloc(&d_iqhh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_iqvv, NSTREAMS*m*n*sizeof(cuFloatComplex));
-    cudaMalloc(&d_iqhv, NSTREAMS*m*n*sizeof(cuFloatComplex));
+    cudaMalloc(&d_iqvh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_sum, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_result, NSTREAMS*(m/2)*RESULT_SIZE*sizeof(float));
 
@@ -449,31 +452,38 @@ int main(int argc, char **argv) {
     // myFile.open("out/gpu.bin", ios::out | ios::binary);
     sector_id = 0;
 
+    udp_server server("0.0.0.0",19001);
+    char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
+    for (int j=0; j<n; j++) {
+        server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
+
+    }
+    Sector s(n,m);
+    s.fromByteArray(buff);
+    delete [] buff;
+
+    float a, b;
+
+    #pragma unroll
     for (int i=0; i<m; i++) {
+        #pragma unroll
         for (int j=0; j<n; j++) {
             // cin >> a >> b;
-            iqhh[i*n+j] = make_cuFloatComplex(i, j);
+            a = i*n+(j*2);
+            b = i*n+(j*2+1);
+            iqhh[i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
+            iqvv[i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
+            iqvh[i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
         }
     }
-    for (int i=0; i<m; i++) {
-        for (int j=0; j<n; j++) {
-            // cin >> a >> b;
-            iqvv[i*n+j] = make_cuFloatComplex(j, i);
-        }
-    }
-    for (int i=0; i<m; i++) {
-        for (int j=0; j<n; j++) {
-            // cin >> a >> b;
-            iqhv[i*n+j] = make_cuFloatComplex(j, i);
-        }
-    }
+    
     memcpy(&p_iqhh[0], iqhh, m*n*sizeof(cuFloatComplex));
     memcpy(&p_iqvv[0], iqvv, m*n*sizeof(cuFloatComplex));
-    memcpy(&p_iqhv[0], iqhv, m*n*sizeof(cuFloatComplex));
+    memcpy(&p_iqvh[0], iqvh, m*n*sizeof(cuFloatComplex));
 
     cudaMemcpyAsync(&d_iqhh[0], &p_iqhh[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]);
     cudaMemcpyAsync(&d_iqvv[0], &p_iqvv[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]); 
-    cudaMemcpyAsync(&d_iqhv[0], &p_iqhv[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]); 
+    cudaMemcpyAsync(&d_iqvh[0], &p_iqvh[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]); 
     
     do {
         // for(int stream_id=0; stream_id < NSTREAMS; stream_id++) {
@@ -490,68 +500,68 @@ int main(int argc, char **argv) {
             // apply Hamming coefficients
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqhh, d_hamming, offset);
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqvv, d_hamming, offset);
-            __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqhv, d_hamming, offset);
+            __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqvh, d_hamming, offset);
             // exit(0);
 
             // FFT range profile
             cufftExecC2C(fft_range_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_FORWARD);
             cufftExecC2C(fft_range_handle[stream_id], &d_iqvv[offset], &d_iqvv[offset], CUFFT_FORWARD);
-            cufftExecC2C(fft_range_handle[stream_id], &d_iqhv[offset], &d_iqhv[offset], CUFFT_FORWARD);
+            cufftExecC2C(fft_range_handle[stream_id], &d_iqvh[offset], &d_iqvh[offset], CUFFT_FORWARD);
 
             // FFT+shift Doppler profile
             __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, d_sum, offset);
             __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqhh, d_sum, offset);
             __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, d_sum, offset);
             __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqvv, d_sum, offset);
-            __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhv, d_sum, offset);
-            __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqhv, d_sum, offset);
+            __sum_v4<<<m/2,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvh, d_sum, offset);
+            __avgconj<<<m,n,0,stream[stream_id]>>>(d_iqvh, d_sum, offset);
 
             cufftExecC2C(fft_doppler_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_FORWARD);
             cufftExecC2C(fft_doppler_handle[stream_id], &d_iqvv[offset], &d_iqvv[offset], CUFFT_FORWARD);
-            cufftExecC2C(fft_doppler_handle[stream_id], &d_iqhv[offset], &d_iqhv[offset], CUFFT_FORWARD);
+            cufftExecC2C(fft_doppler_handle[stream_id], &d_iqvh[offset], &d_iqvh[offset], CUFFT_FORWARD);
 
             __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhh, offset);
             __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqvv, offset);
-            __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqhv, offset);
+            __conjugate<<<m,n,0,stream[stream_id]>>>(d_iqvh, offset);
 
             __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqvv, n, offset);
-            __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqhv, n, offset);
+            __shift<<<m,n/2,0,stream[stream_id]>>>(d_iqvh, n, offset);
 
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvv, n, offset);
-            __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqhv, n, offset);
+            __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvh, n, offset);
 
             // Get absolute value squared
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, n, offset);
-            __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqhv, n, offset);
+            __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqvh, n, offset);
 
             // FFT PDOP
             cufftExecC2C(fft_pdop_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_FORWARD);
             cufftExecC2C(fft_pdop_handle[stream_id], &d_iqvv[offset], &d_iqvv[offset], CUFFT_FORWARD);
-            cufftExecC2C(fft_pdop_handle[stream_id], &d_iqhv[offset], &d_iqhv[offset], CUFFT_FORWARD);
+            cufftExecC2C(fft_pdop_handle[stream_id], &d_iqvh[offset], &d_iqvh[offset], CUFFT_FORWARD);
 
             // Apply MA coefficients
             __apply_ma<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, offset);
             __apply_ma<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, offset);
-            __apply_ma<<<m/2,n,0,stream[stream_id]>>>(d_iqhv, offset);
+            __apply_ma<<<m/2,n,0,stream[stream_id]>>>(d_iqvh, offset);
 
             // Inverse FFT
             cufftExecC2C(fft_pdop_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_INVERSE);
             cufftExecC2C(fft_pdop_handle[stream_id], &d_iqvv[offset], &d_iqvv[offset], CUFFT_INVERSE);
-            cufftExecC2C(fft_pdop_handle[stream_id], &d_iqhv[offset], &d_iqhv[offset], CUFFT_INVERSE);
+            cufftExecC2C(fft_pdop_handle[stream_id], &d_iqvh[offset], &d_iqvh[offset], CUFFT_INVERSE);
 
             __scale_real<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, offset);
             __scale_real<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, offset);
-            __scale_real<<<m/2,n,0,stream[stream_id]>>>(d_iqhv, offset);
+            __scale_real<<<m/2,n,0,stream[stream_id]>>>(d_iqvh, offset);
 
             // Sum
             // __sum_inplace_v2<<<m/4,n,0,stream[stream_id]>>>(d_iqhh, offset);
             // __sum_inplace_v2<<<m/4,n,0,stream[stream_id]>>>(d_iqvv, offset);
             __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhh, offset);
             __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvv, offset);
-            __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqhv, offset);
+            __sum_inplace_v4<<<m/4,n,2*n*sizeof(cuFloatComplex),stream[stream_id]>>>(d_iqvh, offset);
 
             // cudaMemcpy(iqhh, d_iqhh, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
             // cudaMemcpy(iqvv, d_iqvv, m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
@@ -565,42 +575,43 @@ int main(int argc, char **argv) {
             // exit(0);
 
             // Calculate ZdB, Zdr
-            __calcresult_v2<<<1,m/2,0,stream[stream_id]>>>(d_iqhh, d_iqvv, d_iqhv, d_result, n, offset, result_offset);
+            __calcresult_v2<<<1,m/2,0,stream[stream_id]>>>(d_iqhh, d_iqvv, d_iqvh, d_result, n, offset, result_offset);
 
             int next_stream_id = (sector_id+1) % NSTREAMS;
             int next_offset = next_stream_id * (m*n);
 
+            char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
+            for (int j=0; j<n; j++) {
+                server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
+        
+            }
+            s.fromByteArray(buff);
+            delete [] buff;
+
             #pragma unroll
             for (int i=0; i<m; i++) {
                 #pragma unroll
                 for (int j=0; j<n; j++) {
                     // cin >> a >> b;
-                    iqhh[i*n+j] = make_cuFloatComplex(i, j);
+                    a = s.hh[i*n+(j*2)];
+                    b = s.hh[i*n+(j*2+1)];
+                    iqhh[i*n+j] = make_cuFloatComplex(a, b);
+                    a = s.vv[i*n+(j*2)];
+                    b = s.vv[i*n+(j*2+1)];
+                    iqvv[i*n+j] = make_cuFloatComplex(a, b);
+                    a = s.vh[i*n+(j*2)];
+                    b = s.vh[i*n+(j*2+1)];
+                    iqvh[i*n+j] = make_cuFloatComplex(a, b);
                 }
             }
-            #pragma unroll
-            for (int i=0; i<m; i++) {
-                #pragma unroll
-                for (int j=0; j<n; j++) {
-                    // cin >> a >> b;
-                    iqvv[i*n+j] = make_cuFloatComplex(i, j);
-                }
-            }
-            #pragma unroll
-            for (int i=0; i<m; i++) {
-                #pragma unroll
-                for (int j=0; j<n; j++) {
-                    // cin >> a >> b;
-                    iqhv[i*n+j] = make_cuFloatComplex(i, j);
-                }
-            }
+            
             memcpy(&p_iqhh[next_offset], iqhh, m*n*sizeof(cuFloatComplex));
             memcpy(&p_iqvv[next_offset], iqvv, m*n*sizeof(cuFloatComplex));
-            memcpy(&p_iqhv[next_offset], iqhv, m*n*sizeof(cuFloatComplex));
+            memcpy(&p_iqvh[next_offset], iqvh, m*n*sizeof(cuFloatComplex));
 
             cudaMemcpyAsync(&d_iqhh[next_offset], &p_iqhh[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]);
             cudaMemcpyAsync(&d_iqvv[next_offset], &p_iqvv[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
-            cudaMemcpyAsync(&d_iqhv[next_offset], &p_iqhv[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
+            cudaMemcpyAsync(&d_iqvh[next_offset], &p_iqvh[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
 
             cudaMemcpyAsync(&result[result_offset], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
 
@@ -629,6 +640,7 @@ int main(int argc, char **argv) {
     cudaEventDestroy(startEvent);
     cudaEventDestroy(stopEvent);
 
+     
     delete[] fft_range_handle;
     delete[] fft_doppler_handle;
     delete[] fft_pdop_handle;
@@ -641,15 +653,15 @@ int main(int argc, char **argv) {
     // cudaFree(d_ma);
     cudaFree(d_iqhh);
     cudaFree(d_iqvv);
-    cudaFree(d_iqhv);
+    cudaFree(d_iqvh);
 
     cudaFreeHost(p_iqhh);
     cudaFreeHost(p_iqvv);
-    cudaFreeHost(p_iqhv);
+    cudaFreeHost(p_iqvh);
 
     delete[] iqhh;
     delete[] iqvv;
-    delete[] iqhv;
+    delete[] iqvh;
 
     return 0;
 }
