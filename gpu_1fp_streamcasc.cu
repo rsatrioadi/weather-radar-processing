@@ -593,15 +593,11 @@ int main(int argc, char **argv) {
                 #pragma unroll
                 for (int j=0; j<n; j++) {
                     // cin >> a >> b;
-                    a = s.hh[i*n+(j*2)];
-                    b = s.hh[i*n+(j*2+1)];
-                    iqhh[i*n+j] = make_cuFloatComplex(a, b);
-                    a = s.vv[i*n+(j*2)];
-                    b = s.vv[i*n+(j*2+1)];
-                    iqvv[i*n+j] = make_cuFloatComplex(a, b);
-                    a = s.vh[i*n+(j*2)];
-                    b = s.vh[i*n+(j*2+1)];
-                    iqvh[i*n+j] = make_cuFloatComplex(a, b);
+                    a = i*n+(j*2);
+                    b = i*n+(j*2+1);
+                    iqhh[i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
+                    iqvv[i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
+                    iqvh[i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
                 }
             }
             
