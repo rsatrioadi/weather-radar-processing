@@ -456,7 +456,6 @@ int main(int argc, char **argv) {
     char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
     for (int j=0; j<n; j++) {
         server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
-
     }
     Sector s(n,m);
     s.fromByteArray(buff);
@@ -622,7 +621,7 @@ int main(int argc, char **argv) {
             sector_id++;
 
         // }
-    } while(sector_id < 127);
+    } while(sector_id < 142);
 
     // myFile.close();
 
