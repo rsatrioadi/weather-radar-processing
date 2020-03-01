@@ -7,11 +7,12 @@
 #include <sys/time.h>
 #include <assert.h>  
 #include "sector.h"  
-#include "udp_client_server.h"
+#include "udpbroadcast.h"
+#include "floats.h"
 // #include <fstream>
 
 using namespace std;
-using namespace udp_client_server;
+using namespace udpbroadcast;
 
 #define k_rangeres 30
 #define k_calib 1941.05
@@ -339,6 +340,19 @@ void tock(timeval *begin, timeval *end, string caption) {
 int main(int argc, char **argv) {
     ios_base::sync_with_stdio(false);
 
+    // // tes serialize floats to unsigned chars:
+    // float floats[3] = {1.2, 3.4, -5.6e7};
+    // unsigned char* bytes = new unsigned char[3*4];
+    // aftoab(floats,3,bytes);
+    // float floats2[3];
+    // abtoaf(bytes,3,floats2);
+    // for (int i=0; i<3; i++) {
+    //     cout << floats2[i] << " ";
+    // }
+    // cout << endl;
+    // exit(0);
+
+
     int NSTREAMS = atoi(argv[1]);
     if (NSTREAMS == 0) {
         NSTREAMS = 1;
@@ -452,18 +466,27 @@ int main(int argc, char **argv) {
     // myFile.open("out/gpu.bin", ios::out | ios::binary);
     sector_id = 0;
 
-    udp_server server("0.0.0.0",19001);
+    udpserver server(19001); // receive raw data
+    udpclient client(19002); // send calc result
+
+
+    cout << "siap terima " << sector_id << endl;
     char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
     for (int j=0; j<n; j++) {
         server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
-
+        //for (int i=0; i<NUM_BYTES_PER_SAMPLE*m*n; i++) {
+        //    cout << buff[i] << " ";
+        //}
+        //cout << j << ", ";
     }
+    //cout << "done!" << endl;
     Sector s(n,m);
     s.fromByteArray(buff);
     delete [] buff;
 
-    float a, b;
+    int a, b;
 
+    cout << "bikin matriks" << endl;
     #pragma unroll
     for (int i=0; i<m; i++) {
         #pragma unroll
@@ -477,6 +500,7 @@ int main(int argc, char **argv) {
         }
     }
     
+    cout << "copy ke device" << endl;
     memcpy(&p_iqhh[0], iqhh, m*n*sizeof(cuFloatComplex));
     memcpy(&p_iqvv[0], iqvv, m*n*sizeof(cuFloatComplex));
     memcpy(&p_iqvh[0], iqvh, m*n*sizeof(cuFloatComplex));
@@ -497,6 +521,9 @@ int main(int argc, char **argv) {
             int offset = stream_id * (m*n);
             int result_offset = stream_id * (m/2)*RESULT_SIZE;
 
+
+            cout << "stage I" << endl;
+            
             // apply Hamming coefficients
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqhh, d_hamming, offset);
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqvv, d_hamming, offset);
@@ -532,6 +559,7 @@ int main(int argc, char **argv) {
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvv, n, offset);
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvh, n, offset);
 
+            cout << "stage II" << endl;
             // Get absolute value squared
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, n, offset);
@@ -574,12 +602,17 @@ int main(int argc, char **argv) {
             // }
             // exit(0);
 
+
+            cout << "stage III" << endl;
             // Calculate ZdB, Zdr
             __calcresult_v2<<<1,m/2,0,stream[stream_id]>>>(d_iqhh, d_iqvv, d_iqvh, d_result, n, offset, result_offset);
 
             int next_stream_id = (sector_id+1) % NSTREAMS;
             int next_offset = next_stream_id * (m*n);
 
+            
+            sector_id++;
+            cout << "siap terima " << sector_id << endl;
             char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
             for (int j=0; j<n; j++) {
                 server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
@@ -611,6 +644,18 @@ int main(int argc, char **argv) {
 
             cudaMemcpyAsync(&result[result_offset], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
 
+            unsigned char* tBuff = new unsigned char[4*m/2];
+            aftoab(&result[result_offset],m/2,tBuff);
+
+            // // make sure serialized result can be converted back
+            // float* tBack = new float[m/2];
+            // abtoaf(tBuff,m/2,tBack);
+            // for (int i=0; i<m/2; i++) {
+            //     cout << result[result_offset+i] << " " << tBack[i] << endl;
+            // }
+
+            //client.send(&result[result_offset], (m/2)*RESULT_SIZE*sizeof(float));
+
             // tock(&tb, &te, "time");
 
             // for (int i=0; i<m/2; i++) {
@@ -619,10 +664,9 @@ int main(int argc, char **argv) {
 
             // exit(0);
 
-            sector_id++;
 
         // }
-    } while(sector_id < 127);
+    } while(sector_id < 142);
 
     // myFile.close();
 
