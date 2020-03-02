@@ -19,6 +19,8 @@ using namespace udpbroadcast;
 
 #define RESULT_SIZE 2
 
+#define NUM_SECTORS 143
+
 //#define NSTREAMS 16
 
 #define DEBUG
@@ -467,7 +469,8 @@ int main(int argc, char **argv) {
     sector_id = 0;
 
     udpserver server(19001); // receive raw data
-    udpclient client(19002); // send calc result
+    udpclient zdbClient(19002); // send zdb result
+    udpclient zdrClient(19003); // send zdr result
 
 
     cout << "siap terima " << sector_id << endl;
@@ -606,6 +609,7 @@ int main(int argc, char **argv) {
             int next_stream_id = (sector_id+1) % NSTREAMS;
             int next_offset = next_stream_id * (m*n);
 
+            int oldsector = sector_id;
             
             sector_id++;
             cout << "siap terima " << sector_id << endl;
@@ -640,17 +644,37 @@ int main(int argc, char **argv) {
 
             cudaMemcpyAsync(&result[result_offset], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
 
-            unsigned char* tBuff = new unsigned char[4*m/2];
-            aftoab(&result[result_offset],m/2,tBuff);
+            float* zdb = new float[m/2];
+            float* zdr = new float[m/2];
 
-            // // make sure serialized result can be converted back
-            // float* tBack = new float[m/2];
-            // abtoaf(tBuff,m/2,tBack);
-            // for (int i=0; i<m/2; i++) {
-            //     cout << result[result_offset+i] << " " << tBack[i] << endl;
-            // }
+            for (int i=0; i<m/2; i++) {
+                zdb[i] = result[result_offset+i*RESULT_SIZE+0];
+                zdr[i] = result[result_offset+i*RESULT_SIZE+1];
+            }
 
-            //client.send(&result[result_offset], (m/2)*RESULT_SIZE*sizeof(float));
+            cout << "zdb: ";
+            for (int i=0; i<m/2; i++) {
+                cout << zdb[i] << " ";
+            }
+            cout << endl;
+
+            unsigned char* zdbBuff = new unsigned char[sizeof(float)*(m/2)+2];
+            unsigned char* zdrBuff = new unsigned char[sizeof(float)*(m/2)+2];
+            zdbBuff[0] = (oldsector>>8)&0xff;
+            zdbBuff[1] = (oldsector)&0xff;
+            zdrBuff[0] = (oldsector>>8)&0xff;
+            zdrBuff[1] = (oldsector)&0xff;
+            aftoab(zdb,(m/2),&zdbBuff[2]);
+            aftoab(zdr,(m/2),&zdrBuff[2]);
+
+            cout << "in bytes: ";
+            for (int i=0; i<2+m/2; i++) {
+                cout << (int)zdbBuff[i] << " ";
+            }
+            cout << endl;
+
+            zdbClient.send((const char*)zdbBuff, (m/2)*sizeof(float)+2);
+            zdrClient.send((const char*)zdrBuff, (m/2)*sizeof(float)+2);
 
             // tock(&tb, &te, "time");
 
@@ -662,7 +686,7 @@ int main(int argc, char **argv) {
 
 
         // }
-    } while(sector_id < 142);
+    } while(sector_id < NUM_SECTORS-1);
 
     // myFile.close();
 
