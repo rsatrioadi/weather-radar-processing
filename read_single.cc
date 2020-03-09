@@ -1,12 +1,18 @@
 #include <iostream>
 #include <stdlib.h>
-#include <cuda.h>
-#include <cuComplex.h>
 #include <fftw3.h>
 #include <sys/time.h>    
+#include <math.h>
 // #include <fstream>
 
+#include "udpbroadcast.h"
+#include "sector.h"
+#include "floats.h"
+
 using namespace std;
+using namespace udpbroadcast;
+
+#define NUM_BYTES_PER_SAMPLE (3*2*2)
 
 float *generate_hamming_coef(int m, int n) {
 
@@ -63,7 +69,7 @@ int main(int argc, char **argv) {
     gettimeofday(&tb, NULL);
 
     //cuDoubleComplex *iqhh, *iqvv;
-    fftwf_complex *iqhh, *iqvv, *iqhv;
+    fftwf_complex *iqhh, *iqvv, *iqvh;
     float *powhh, *powvv, *powhv;
     int sector_id;
 
@@ -79,13 +85,13 @@ int main(int argc, char **argv) {
     //iqvv = new cuDoubleComplex[m*n];
     iqhh = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
     iqvv = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
-    iqhv = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
+    iqvh = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * m*n);
 
     powhh = new float[(m/2)*n];
     powvv = new float[(m/2)*n];
     powhv = new float[(m/2)*n];
 
-    float a, b;
+    //float a, b;
 
     // Generate Hamming coefficients
     const float *hamming_coef = generate_hamming_coef(m, n);
@@ -116,6 +122,22 @@ int main(int argc, char **argv) {
 
     cout << "initialization: " << e-bb << endl;
 
+    udpserver server(19001); // receive raw data
+    udpclient zdbClient(19002); // send zdb result
+    udpclient zdrClient(19003); // send zdr result
+
+    cout << "siap terima " << sector_id << endl;
+    char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
+    for (int j=0; j<n; j++) {
+        server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
+    }
+    //cout << "done!" << endl;
+    Sector s(n,m);
+    s.fromByteArray(buff);
+    delete [] buff;
+
+    int a, b;
+
     // ofstream myFile;
     // myFile.open("out/cpu.bin", ios::out | ios::binary);
     sector_id = -1;
@@ -123,7 +145,7 @@ int main(int argc, char **argv) {
     struct timeval t1, t2;
     gettimeofday(&t1, NULL);
 
-    while(sector_id < 127) {
+    while(sector_id < 142) {
 
         // gettimeofday(&tb, NULL);
 
@@ -134,22 +156,14 @@ int main(int argc, char **argv) {
             for (int j=0; j<n; j++) {
             	// cin >> a >> b;
                 //iqhh[i*n+j] = make_cuDoubleComplex(a, b);
-                iqhh[i*n+j][0] = i;
-                iqhh[i*n+j][1] = j;
-            }
-        }
-        for (int i=0; i<m; i++) {
-            for (int j=0; j<n; j++) {
-                // cin >> a >> b;
-                iqvv[i*n+j][0] = j;
-                iqvv[i*n+j][1] = i;
-            }
-        }
-        for (int i=0; i<m; i++) {
-            for (int j=0; j<n; j++) {
-                // cin >> a >> b;
-                iqhv[i*n+j][0] = i;
-                iqhv[i*n+j][1] = i;
+                a = i*n+(j*2);
+                b = i*n+(j*2+1);
+                iqhh[i*n+j][0] = s.hh[a];
+                iqhh[i*n+j][1] = s.hh[b];
+                iqvv[i*n+j][0] = s.vv[a];
+                iqvv[i*n+j][1] = s.vv[b];
+                iqvh[i*n+j][0] = s.vh[a];
+                iqvh[i*n+j][1] = s.vh[b];
             }
         }
 
@@ -193,8 +207,8 @@ int main(int argc, char **argv) {
                 iqvv[i*n+j][1] *= hamming_coef[i*n+j];
 
                 // HV
-                iqhv[i*n+j][0] *= hamming_coef[i*n+j];
-                iqhv[i*n+j][1] *= hamming_coef[i*n+j];
+                iqvh[i*n+j][0] *= hamming_coef[i*n+j];
+                iqvh[i*n+j][1] *= hamming_coef[i*n+j];
             }
         }
 
@@ -232,13 +246,13 @@ int main(int argc, char **argv) {
 
             // VV
             for (int i=0; i<m; i++) {
-                fft_range_buffer[i][0] = iqhv[i*n+j][0];
-                fft_range_buffer[i][1] = iqhv[i*n+j][1];
+                fft_range_buffer[i][0] = iqvh[i*n+j][0];
+                fft_range_buffer[i][1] = iqvh[i*n+j][1];
             }
             fftwf_execute(fft_range_plan);
             for (int i=0; i<m; i++) {
-                iqhv[i*n+j][0] = fft_range_buffer[i][0];
-                iqhv[i*n+j][1] = fft_range_buffer[i][1];
+                iqvh[i*n+j][0] = fft_range_buffer[i][0];
+                iqvh[i*n+j][1] = fft_range_buffer[i][1];
             }
         }
         fftwf_destroy_plan(fft_range_plan);
@@ -317,14 +331,14 @@ int main(int argc, char **argv) {
             // HV
             avgi = 0; avgq = 0;
             for (int j=0; j<n; j++) {
-                avgi += iqhv[i*n+j][0];
-                avgq += iqhv[i*n+j][1];
+                avgi += iqvh[i*n+j][0];
+                avgq += iqvh[i*n+j][1];
             }
             avgi /= n;
             avgq /= n;
             for (int j=0; j<n; j++) {
-                fft_doppler_buffer[j][0] = (iqhv[i*n+j][0] - avgi);
-                fft_doppler_buffer[j][1] = (iqhv[i*n+j][1] - avgq) * -1;
+                fft_doppler_buffer[j][0] = (iqvh[i*n+j][0] - avgi);
+                fft_doppler_buffer[j][1] = (iqvh[i*n+j][1] - avgq) * -1;
             }
             fftwf_execute(fft_doppler_plan);
 
@@ -333,15 +347,15 @@ int main(int argc, char **argv) {
             // }
             // cout << endl;
             for (int j=0; j<n/2; j++) {
-                iqhv[i*n+j][0] = fft_doppler_buffer[j+n/2][0];
-                iqhv[i*n+j][1] = fft_doppler_buffer[j+n/2][1] * -1;
-                iqhv[i*n+j+n/2][0] = fft_doppler_buffer[j][0];
-                iqhv[i*n+j+n/2][1] = fft_doppler_buffer[j][1] * -1;
+                iqvh[i*n+j][0] = fft_doppler_buffer[j+n/2][0];
+                iqvh[i*n+j][1] = fft_doppler_buffer[j+n/2][1] * -1;
+                iqvh[i*n+j+n/2][0] = fft_doppler_buffer[j][0];
+                iqvh[i*n+j+n/2][1] = fft_doppler_buffer[j][1] * -1;
             }
-            iqhv[i*n+(n-1)][0] = 0;
-            iqhv[i*n+(n-1)][1] = 0;
-            iqhv[i*n+(n-2)][0] = 0;
-            iqhv[i*n+(n-2)][1] = 0;
+            iqvh[i*n+(n-1)][0] = 0;
+            iqvh[i*n+(n-1)][1] = 0;
+            iqvh[i*n+(n-2)][0] = 0;
+            iqvh[i*n+(n-2)][1] = 0;
         }
         fftwf_destroy_plan(fft_doppler_plan);
         fftwf_free(fft_doppler_buffer);
@@ -417,7 +431,7 @@ int main(int argc, char **argv) {
         for (int i=0; i<m/2; i++) {
             // HV
             for (int j=0; j<n; j++) {
-                fft_pdop_buffer[j][0] = iqhv[i*n+j][0] * iqhv[i*n+j][0] + iqhv[i*n+j][1] * iqhv[i*n+j][1];
+                fft_pdop_buffer[j][0] = iqvh[i*n+j][0] * iqvh[i*n+j][0] + iqvh[i*n+j][1] * iqvh[i*n+j][1];
                 fft_pdop_buffer[j][1] = 0;
                 // cout << fft_pdop_buffer[j][0] << " ";
             }
@@ -459,6 +473,26 @@ int main(int argc, char **argv) {
             // cout << zdb[i] << " " << zdr[i] << endl;
         }
 
+        cout << "zdb: ";
+        for (int i=0; i<m/2; i++) {
+            cout << zdb[i] << " ";
+        }
+        cout << endl;
+
+        
+        unsigned char* zdbBuff = new unsigned char[sizeof(float)*(m/2)+2];
+        unsigned char* zdrBuff = new unsigned char[sizeof(float)*(m/2)+2];
+        zdbBuff[0] = (sector_id>>8)&0xff;
+        zdbBuff[1] = (sector_id)&0xff;
+        zdrBuff[0] = (sector_id>>8)&0xff;
+        zdrBuff[1] = (sector_id)&0xff;
+        aftoab(zdb,(m/2),&zdbBuff[2]);
+        aftoab(zdr,(m/2),&zdrBuff[2]);
+
+        zdbClient.send((const char*)zdbBuff, (m/2)*sizeof(float)+2);
+        zdrClient.send((const char*)zdrBuff, (m/2)*sizeof(float)+2);
+
+
         fftwf_free(fft_mult_buffer);
         fftwf_free(fft_pdop_buffer);
 
@@ -488,7 +522,7 @@ int main(int argc, char **argv) {
 
     //delete iqvv;
     //delete iqhh;
-    fftwf_free(iqhv);
+    fftwf_free(iqvh);
     fftwf_free(iqvv);
     fftwf_free(iqhh);
 

@@ -21,6 +21,8 @@ using namespace udpbroadcast;
 
 #define NUM_SECTORS 143
 
+#define NUM_BYTES_PER_SAMPLE (3*2*2)
+
 //#define NSTREAMS 16
 
 #define DEBUG
@@ -336,8 +338,6 @@ void tock(timeval *begin, timeval *end, string caption) {
 
     cout << caption << ": " << e-bb << endl;
 }
-
-#define NUM_BYTES_PER_SAMPLE (3*2*2)
 
 int main(int argc, char **argv) {
     ios_base::sync_with_stdio(false);
