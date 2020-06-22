@@ -8,6 +8,7 @@ class Sector {
     public:
         int sweeps, samples;
         short *hh, *vv, *vh;
+        short number;
 
         Sector(int num_sweeps, int num_samples);
         ~Sector();

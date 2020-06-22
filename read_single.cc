@@ -73,8 +73,8 @@ int main(int argc, char **argv) {
     float *powhh, *powvv, *powhv;
     int sector_id;
 
-    const int m = 1024; // cell
-    const int n = 512;  // sweep
+    const int m = 1024; // NUM_SWEEPS
+    const int n = 512;  // NUM_SAMPLES
 
     const int ma_count = 7;
 
@@ -120,23 +120,11 @@ int main(int argc, char **argv) {
     bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
     e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
 
-    cout << "initialization: " << e-bb << endl;
+    // cout << "initialization: " << e-bb << endl;
 
     udpserver server(19001); // receive raw data
     udpclient zdbClient(19002); // send zdb result
     udpclient zdrClient(19003); // send zdr result
-
-    cout << "siap terima " << sector_id << endl;
-    char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
-    for (int j=0; j<n; j++) {
-        server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
-    }
-    //cout << "done!" << endl;
-    Sector s(n,m);
-    s.fromByteArray(buff);
-    delete [] buff;
-
-    int a, b;
 
     // ofstream myFile;
     // myFile.open("out/cpu.bin", ios::out | ios::binary);
@@ -152,12 +140,28 @@ int main(int argc, char **argv) {
         // Read 1 sector data
         // cin >> sector_id;
         sector_id++;
+
+        cout << "receiving sector " << sector_id << endl;
+        char *buff = new char[NUM_BYTES_PER_SAMPLE*n*m];
+        for (int j=0; j<m; j++) {
+            server.recv(&buff[j*(NUM_BYTES_PER_SAMPLE*n)],NUM_BYTES_PER_SAMPLE*n);
+        }
+        //cout << "done!" << endl;
+        Sector s(m,n);
+        s.fromByteArray(buff);
+        // s.print();
+        // exit(0);
+        delete [] buff;
+
+        int a, b;
+
+        int idx=0;
         for (int i=0; i<m; i++) {
             for (int j=0; j<n; j++) {
             	// cin >> a >> b;
                 //iqhh[i*n+j] = make_cuDoubleComplex(a, b);
-                a = i*n+(j*2);
-                b = i*n+(j*2+1);
+                a = idx++;
+                b = idx++;
                 iqhh[i*n+j][0] = s.hh[a];
                 iqhh[i*n+j][1] = s.hh[b];
                 iqvv[i*n+j][0] = s.vv[a];
@@ -167,6 +171,30 @@ int main(int argc, char **argv) {
             }
         }
 
+        // cout << "hh:" << endl;
+        // for (int i=0; i<m; i++) {
+        //     for (int j=0; j<n; j++) {
+        //         cout << iqhh[i*n+j][0] << " " << iqhh[i*n+j][1] << " ";
+        //     }
+        // }
+        // cout << endl;
+
+        // cout << "vv:" << endl;
+        // for (int i=0; i<m; i++) {
+        //     for (int j=0; j<n; j++) {
+        //         cout << iqvv[i*n+j][0] << " " << iqvv[i*n+j][1] << " ";
+        //     }
+        // }
+        // cout << endl;
+
+        // cout << "vh:" << endl;
+        // for (int i=0; i<m; i++) {
+        //     for (int j=0; j<n; j++) {
+        //         cout << iqvh[i*n+j][0] << " " << iqvh[i*n+j][1] << " ";
+        //     }
+        // }
+        // cout << endl;
+        // exit(0);
         // gettimeofday(&te, NULL);
         // bb = (unsigned long long)(tb.tv_sec) * 1000000 + (unsigned long long)(tb.tv_usec) / 1;
         // e = (unsigned long long)(te.tv_sec) * 1000000 + (unsigned long long)(te.tv_usec) / 1;
@@ -479,7 +507,6 @@ int main(int argc, char **argv) {
         }
         cout << endl;
 
-        
         unsigned char* zdbBuff = new unsigned char[sizeof(float)*(m/2)+2];
         unsigned char* zdrBuff = new unsigned char[sizeof(float)*(m/2)+2];
         zdbBuff[0] = (sector_id>>8)&0xff;

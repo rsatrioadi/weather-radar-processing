@@ -20,6 +20,7 @@ using namespace udpbroadcast;
 #define RESULT_SIZE 2
 
 #define NUM_SECTORS 143
+#define NUM_ELEVATIONS 9
 
 #define NUM_BYTES_PER_SAMPLE (3*2*2)
 
@@ -283,7 +284,7 @@ __global__ void __sum_inplace_v3(cuFloatComplex *in, int offset) {
     }
 
     if(j==0) {
-        in[i*n] = sdata[j];
+        in[offset+(i*n)] = sdata[j];
     }
 }
 
@@ -310,7 +311,7 @@ __global__ void __sum_inplace_v4(cuFloatComplex *in, int offset) {
     if(j==0) {
         #pragma unroll
         for (unsigned int d=0; d<2; d++) {
-            in[i*n+n*d] = sdata[j+n*d];
+            in[offset+(i*n+n*d)] = sdata[j+n*d];
         }
     }
 }
@@ -356,7 +357,7 @@ int main(int argc, char **argv) {
 
 
     int NSTREAMS = atoi(argv[1]);
-    if (NSTREAMS == 0) {
+    if (NSTREAMS < 1) {
         NSTREAMS = 1;
     }
 
@@ -364,12 +365,14 @@ int main(int argc, char **argv) {
 
     tick(&tb);
 
-    cuFloatComplex *iqhh, *iqvv, *iqvh, *p_iqhh, *p_iqvv, *p_iqvh;
+    cuFloatComplex *iqhh, *iqvv, *iqvh;
+    cuFloatComplex *p_iqhh, *p_iqvv, *p_iqvh;
     float *result;
     int sector_id;
+    int elev = 0;
 
-    const int m = 1024; // cell
-    const int n = 512;  // sweep
+    const int m = 1024; // NUM_SWEEPS
+    const int n = 512;  // NUM_SAMPLES
 
     const int ma_count = 7;
 
@@ -379,7 +382,7 @@ int main(int argc, char **argv) {
     cudaMallocHost((void**)&p_iqhh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMallocHost((void**)&p_iqvv, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMallocHost((void**)&p_iqvh, NSTREAMS*m*n*sizeof(cuFloatComplex));
-    result = new float[NSTREAMS*(m/2)*RESULT_SIZE];
+    result = new float[NSTREAMS*(m/2)*RESULT_SIZE*NUM_ELEVATIONS];
 
     // Generate Hamming coefficients
     const float *hamming_coef = generate_hamming_coef(m, n);
@@ -418,7 +421,7 @@ int main(int argc, char **argv) {
     cudaMalloc(&d_iqvv, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_iqvh, NSTREAMS*m*n*sizeof(cuFloatComplex));
     cudaMalloc(&d_sum, NSTREAMS*m*n*sizeof(cuFloatComplex));
-    cudaMalloc(&d_result, NSTREAMS*(m/2)*RESULT_SIZE*sizeof(float));
+    cudaMalloc(&d_result, NSTREAMS*(m/2)*RESULT_SIZE*NUM_ELEVATIONS*sizeof(float));
 
     cudaMemcpy(d_hamming, hamming_coef, m*n*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpyToSymbol(d_ma, fft_ma, n*sizeof(cuFloatComplex), 0, cudaMemcpyHostToDevice);
@@ -473,36 +476,38 @@ int main(int argc, char **argv) {
     udpclient zdrClient(19003); // send zdr result
 
 
-    cout << "siap terima " << sector_id << endl;
-    char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
-    for (int j=0; j<n; j++) {
-        server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
+    // cout << "siap terima " << sector_id << endl;
+    char *buff = new char[NUM_BYTES_PER_SAMPLE*n*m];
+    for (int j=0; j<m; j++) {
+        server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*n),NUM_BYTES_PER_SAMPLE*n);
     }
     //cout << "done!" << endl;
-    Sector s(n,m);
+    cout << sector_id << " received." << endl;
+    Sector s(m,n);
     s.fromByteArray(buff);
     delete [] buff;
 
     int a, b;
 
-    cout << "bikin matriks" << endl;
+    // cout << "bikin matriks" << endl;
+    int idx=0;
     #pragma unroll
     for (int i=0; i<m; i++) {
         #pragma unroll
         for (int j=0; j<n; j++) {
             // cin >> a >> b;
-            a = i*n+(j*2);
-            b = i*n+(j*2+1);
-            iqhh[i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
-            iqvv[i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
-            iqvh[i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
+            a = idx++;
+            b = idx++;
+            p_iqhh[i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
+            p_iqvv[i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
+            p_iqvh[i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
         }
     }
     
-    cout << "copy ke device" << endl;
-    memcpy(&p_iqhh[0], iqhh, m*n*sizeof(cuFloatComplex));
-    memcpy(&p_iqvv[0], iqvv, m*n*sizeof(cuFloatComplex));
-    memcpy(&p_iqvh[0], iqvh, m*n*sizeof(cuFloatComplex));
+    // cout << "copy ke device" << endl;
+    // memcpy(&p_iqhh[0], iqhh, m*n*sizeof(cuFloatComplex));
+    // memcpy(&p_iqvv[0], iqvv, m*n*sizeof(cuFloatComplex));
+    // memcpy(&p_iqvh[0], iqvh, m*n*sizeof(cuFloatComplex));
 
     cudaMemcpyAsync(&d_iqhh[0], &p_iqhh[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]);
     cudaMemcpyAsync(&d_iqvv[0], &p_iqvv[0], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[0]); 
@@ -521,13 +526,31 @@ int main(int argc, char **argv) {
             int result_offset = stream_id * (m/2)*RESULT_SIZE;
 
 
-            cout << "stage I" << endl;
+            // cout << "stage I" << endl;
             
             // apply Hamming coefficients
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqhh, d_hamming, offset);
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqvv, d_hamming, offset);
             __apply_hamming<<<m,n,0,stream[stream_id]>>>(d_iqvh, d_hamming, offset);
             // exit(0);
+
+            cudaMemcpy(iqhh, &d_iqhh[offset], m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
+            cudaMemcpy(iqvv, &d_iqvv[offset], m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
+            cudaMemcpy(iqvh, &d_iqvh[offset], m*n*sizeof(cuFloatComplex), cudaMemcpyDeviceToHost);
+
+            for (int i=0; i<m; i++) {
+                for (int j=0; j<n; j++) {
+                    cout << "(" << iqhh[i*n+j].x << "," << iqhh[i*n+j].y << ") ";
+                }
+                cout << endl;
+            }
+            // for (int i=0; i<m; i++) {
+            //     for (int j=0; j<n; j++) {
+            //         cout << iqvv[i*n+j].x << " ";
+            //     }
+            //     cout << endl;
+            // }
+            exit(0);
 
             // FFT range profile
             cufftExecC2C(fft_range_handle[stream_id], &d_iqhh[offset], &d_iqhh[offset], CUFFT_FORWARD);
@@ -558,7 +581,7 @@ int main(int argc, char **argv) {
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvv, n, offset);
             __clip_v2<<<2,m,0,stream[stream_id]>>>(d_iqvh, n, offset);
 
-            cout << "stage II" << endl;
+            // cout << "stage II" << endl;
             // Get absolute value squared
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqhh, n, offset);
             __abssqr<<<m/2,n,0,stream[stream_id]>>>(d_iqvv, n, offset);
@@ -602,7 +625,7 @@ int main(int argc, char **argv) {
             // exit(0);
 
 
-            cout << "stage III" << endl;
+            // cout << "stage III" << endl;
             // Calculate ZdB, Zdr
             __calcresult_v2<<<1,m/2,0,stream[stream_id]>>>(d_iqhh, d_iqvv, d_iqvh, d_result, n, offset, result_offset);
 
@@ -610,53 +633,62 @@ int main(int argc, char **argv) {
             int next_offset = next_stream_id * (m*n);
 
             int oldsector = sector_id;
+            int oldelev = elev;
             
-            sector_id++;
-            cout << "siap terima " << sector_id << endl;
-            char *buff = new char[NUM_BYTES_PER_SAMPLE*m*n];
-            for (int j=0; j<n; j++) {
-                server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*m),NUM_BYTES_PER_SAMPLE*m);
-        
+            sector_id = (sector_id + 1) % NUM_SECTORS;
+            if (sector_id==0) {
+                elev = (elev + 1) % NUM_ELEVATIONS;
             }
+            // cout << "siap terima " << sector_id << endl;
+            char *buff = new char[NUM_BYTES_PER_SAMPLE*n*m];
+            for (int j=0; j<m; j++) {
+                server.recv(buff+j*(NUM_BYTES_PER_SAMPLE*n),NUM_BYTES_PER_SAMPLE*n);
+            }
+            cout << sector_id << " received." << endl;
             s.fromByteArray(buff);
             delete [] buff;
 
+            idx = 0;
             #pragma unroll
             for (int i=0; i<m; i++) {
                 #pragma unroll
                 for (int j=0; j<n; j++) {
                     // cin >> a >> b;
-                    a = i*n+(j*2);
-                    b = i*n+(j*2+1);
-                    iqhh[i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
-                    iqvv[i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
-                    iqvh[i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
+                    a = idx++;
+                    b = idx++;
+                    p_iqhh[next_offset+i*n+j] = make_cuFloatComplex(s.hh[a], s.hh[b]);
+                    p_iqvv[next_offset+i*n+j] = make_cuFloatComplex(s.vv[a], s.vv[b]);
+                    p_iqvh[next_offset+i*n+j] = make_cuFloatComplex(s.vh[a], s.vh[b]);
                 }
             }
             
-            memcpy(&p_iqhh[next_offset], iqhh, m*n*sizeof(cuFloatComplex));
-            memcpy(&p_iqvv[next_offset], iqvv, m*n*sizeof(cuFloatComplex));
-            memcpy(&p_iqvh[next_offset], iqvh, m*n*sizeof(cuFloatComplex));
+            // memcpy(&p_iqhh[next_offset], iqhh, m*n*sizeof(cuFloatComplex));
+            // memcpy(&p_iqvv[next_offset], iqvv, m*n*sizeof(cuFloatComplex));
+            // memcpy(&p_iqvh[next_offset], iqvh, m*n*sizeof(cuFloatComplex));
 
             cudaMemcpyAsync(&d_iqhh[next_offset], &p_iqhh[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]);
             cudaMemcpyAsync(&d_iqvv[next_offset], &p_iqvv[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
             cudaMemcpyAsync(&d_iqvh[next_offset], &p_iqvh[next_offset], m*n*sizeof(cuFloatComplex), cudaMemcpyHostToDevice, stream[next_stream_id]); 
 
-            cudaMemcpyAsync(&result[result_offset], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
+            cudaMemcpyAsync(&result[result_offset+oldelev*(RESULT_SIZE*(m/2))], &d_result[result_offset], (m/2)*RESULT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream[stream_id]);
 
             float* zdb = new float[m/2];
             float* zdr = new float[m/2];
 
+            // cout << "zdb: ";
+            idx=0;
             for (int i=0; i<m/2; i++) {
-                zdb[i] = result[result_offset+i*RESULT_SIZE+0];
-                zdr[i] = result[result_offset+i*RESULT_SIZE+1];
+                zdb[i] = result[result_offset+(idx++)];
+                zdr[i] = result[result_offset+(idx++)];
+                // cout << zdb[i] << " ";
             }
+            // cout << endl;
 
-            cout << "zdb: ";
-            for (int i=0; i<m/2; i++) {
-                cout << zdb[i] << " ";
-            }
-            cout << endl;
+            // cout << "zdb: ";
+            // for (int i=0; i<m/2; i++) {
+            //     cout << zdb[i] << " ";
+            // }
+            // cout << endl;
 
             unsigned char* zdbBuff = new unsigned char[sizeof(float)*(m/2)+2];
             unsigned char* zdrBuff = new unsigned char[sizeof(float)*(m/2)+2];
@@ -667,11 +699,11 @@ int main(int argc, char **argv) {
             aftoab(zdb,(m/2),&zdbBuff[2]);
             aftoab(zdr,(m/2),&zdrBuff[2]);
 
-            cout << "in bytes: ";
-            for (int i=0; i<2+m/2; i++) {
-                cout << (int)zdbBuff[i] << " ";
-            }
-            cout << endl;
+            // cout << "in bytes: ";
+            // for (int i=0; i<2+m/2; i++) {
+            //     cout << (int)zdbBuff[i] << " ";
+            // }
+            // cout << endl;
 
             zdbClient.send((const char*)zdbBuff, (m/2)*sizeof(float)+2);
             zdrClient.send((const char*)zdrBuff, (m/2)*sizeof(float)+2);
@@ -686,7 +718,7 @@ int main(int argc, char **argv) {
 
 
         // }
-    } while(sector_id < NUM_SECTORS-1);
+    } while(sector_id < (NUM_SECTORS*3)-1);
 
     // myFile.close();
 
@@ -719,9 +751,9 @@ int main(int argc, char **argv) {
     cudaFreeHost(p_iqvv);
     cudaFreeHost(p_iqvh);
 
-    delete[] iqhh;
-    delete[] iqvv;
-    delete[] iqvh;
+    // delete[] iqhh;
+    // delete[] iqvv;
+    // delete[] iqvh;
 
     return 0;
 }

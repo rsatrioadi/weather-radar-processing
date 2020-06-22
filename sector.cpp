@@ -74,6 +74,7 @@ void Sector::print() const {
     for (int i=0; i<sweeps*samples; i++) {
         cout << vh[i*2] << " " << vh[i*2+1] << " ";
     }
+    cout << endl;
 }
 
 // int main() {
