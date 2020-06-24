@@ -16,27 +16,27 @@
 using namespace std;
 using namespace udpbroadcast;
 
-const int 
-  n_sectors=143, 
-  n_sweeps=1024, 
-  n_samples=512, 
-  n_elevations=9;
+const int
+    n_sectors = 143,
+    n_sweeps = 1024,
+    n_samples = 512,
+    n_elevations = 9;
 static const int k_range_resolution = 30;
 static constexpr float k_calibration = 1941.05;
 static const int ma_count = 7;
 int
-  current_sector = 0,
-  current_sweep = 0,
-  current_sample = 0,
-  current_elevation = 0,
-  current_stream = 0;
+    current_sector = 0,
+    current_sweep = 0,
+    current_sample = 0,
+    current_elevation = 0,
+    current_stream = 0;
 const int o_types = 2;
 
 int
-  hh_index_start,
-  vv_index_start,
-  vh_index_start,
-  input_stream_index_offset;
+    hh_index_start,
+    vv_index_start,
+    vh_index_start,
+    input_stream_index_offset;
 
 // host
 cuFloatComplex *p_iq;
@@ -51,10 +51,10 @@ cuFloatComplex *d_sum;
 float *d_result;
 
 // cufft
-cufftHandle 
-  *fft_range_handle,
-  *fft_doppler_handle,
-  *fft_pdop_handle;
+cufftHandle
+    *fft_range_handle,
+    *fft_doppler_handle,
+    *fft_pdop_handle;
 
 cudaStream_t *streams;
 
@@ -74,9 +74,8 @@ __constant__ cuFloatComplex d_ma[512];
 
 __global__ void __apply_hamming(cuFloatComplex *a, float *b, int offset) {
   const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  a[offset+idx] = make_cuFloatComplex(b[idx]*cuCrealf(a[offset+idx]), b[idx]*cuCimagf(a[offset+idx]));
+  a[offset + idx] = make_cuFloatComplex( b[idx] * cuCrealf( a[offset + idx] ), b[idx] * cuCimagf( a[offset + idx] ));
 }
-
 
 
 void setup_ports() {
@@ -149,7 +148,7 @@ void generate_ma_coefficients(int n) {
 
 void generate_constants(Dimension4 dim, int ma_count) {
   cout << "Generating constants..." << endl;
-  generate_hamming_coefficients( dim.width, dim.height );
+  generate_hamming_coefficients( dim.height, dim.width );
   generate_ma_coefficients( ma_count );
 }
 
@@ -207,7 +206,7 @@ void initialize_streams(Dimension4 idim, Dimension4 odim) {
   }
 }
 
-void read_matrix(Dimension4 idim, int sector, int elevation) {
+void read_matrix(Dimension4 idim, int sector, int elevation, int stream) {
   cout << "Reading matrices from network..." << endl;
   char *buff = new char[NUM_BYTES_PER_SAMPLE * idim.m_size];
   for (int j = 0; j < idim.height; j++) {
@@ -223,16 +222,16 @@ void read_matrix(Dimension4 idim, int sector, int elevation) {
 
   // cout << "bikin matriks" << endl;
   int idx = 0;
-  #pragma unroll
-  for (int i = 0; i < idim.height; i++) {
-    #pragma unroll
-    for (int j = 0; j < idim.width; j++) {
+#pragma unroll
+  for (int j = 0; j < idim.height; j++) {
+#pragma unroll
+    for (int i = 0; i < idim.width; i++) {
       // cin >> a >> b;
       a = idx++;
       b = idx++;
-      p_iq[idim.copy_at_depth(j,i,0,0)] = make_cuFloatComplex( s.hh[a], s.hh[b] );
-      p_iq[idim.copy_at_depth(j,i,1,0)] = make_cuFloatComplex( s.vv[a], s.vv[b] );
-      p_iq[idim.copy_at_depth(j,i,2,0)] = make_cuFloatComplex( s.vh[a], s.vh[b] );
+      p_iq[idim.copy_at_depth( i, j, 0, stream )] = make_cuFloatComplex( s.hh[a], s.hh[b] );
+      p_iq[idim.copy_at_depth( i, j, 1, stream )] = make_cuFloatComplex( s.vv[a], s.vv[b] );
+      p_iq[idim.copy_at_depth( i, j, 2, stream )] = make_cuFloatComplex( s.vh[a], s.vh[b] );
     }
   }
 
@@ -260,8 +259,8 @@ void read_matrix(Dimension4 idim, int sector, int elevation) {
 void copy_matrix_to_device(Dimension4 idim, int sector, int elevation, int stream) {
   cout << "Copying matrices to device..." << endl;
   cudaMemcpyAsync(
-      &d_iq[idim.copy_at_depth(0,0,0,stream)],
-      &p_iq[idim.copy_at_depth(0,0,0,stream)],
+      &d_iq[idim.copy_at_depth( 0, 0, 0, stream )],
+      &p_iq[idim.copy_at_depth( 0, 0, 0, stream )],
       idim.m_size * idim.copies * sizeof( cuFloatComplex ),
       cudaMemcpyHostToDevice,
       streams[stream] );
@@ -273,9 +272,10 @@ void perform_stage_1(Dimension4 idim, int stream) {
   cout << "n_samples: " << idim.width << endl;
   cout << "stream: " << stream << endl;
   cout << "input_ary_size: " << idim.m_size << endl;
-  cout << "offset: " << idim.copy_at_depth(0,0,0,stream) << endl;
+  cout << "offset: " << idim.copy_at_depth( 0, 0, 0, stream ) << endl;
   //__apply_hamming<<<idim.height,idim.width*idim.copies,0,streams[stream]>>>( d_iq, d_hamming, idim.m_size, idim.copy_at_depth(0,0,0,stream) );
-  __apply_hamming<<<idim.height,idim.width,0,streams[stream]>>>( d_iq, d_hamming, idim.copy_at_depth(0,0,0,stream) );
+  __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming,
+                                                                    idim.copy_at_depth( 0, 0, 0, stream ));
 }
 
 void perform_stage_2(Dimension4 idim, int stream) {
@@ -303,7 +303,7 @@ void copy_result_to_host(Dimension4 idim, Dimension4 odim, int sector, int eleva
   cout << 2 << endl;
   cudaMemcpyAsync(
       dump,
-      &d_iq[idim.copy_at_depth(0,0,0,stream)],
+      &d_iq[idim.copy_at_depth( 0, 0, 0, stream )],
       idim.m_size * sizeof( cuFloatComplex ),
       cudaMemcpyDeviceToHost,
       streams[stream] );
@@ -311,7 +311,7 @@ void copy_result_to_host(Dimension4 idim, Dimension4 odim, int sector, int eleva
 
   for (int i = 0; i < idim.height; i++) {
     for (int j = 0; j < idim.width; j++) {
-      int idx = idim.copy_at_depth(j,i,0,0);
+      int idx = idim.copy_at_depth( j, i, 0, 0 );
       cout << "(" << dump[idx].x << "," << dump[idx].y << ") ";
     }
     cout << endl;
@@ -322,8 +322,8 @@ void copy_result_to_host(Dimension4 idim, Dimension4 odim, int sector, int eleva
   cout << "Copying result to host..." << endl;
 
   cudaMemcpyAsync(
-      &result[odim.copy_at_depth(0,0,0,elevation)],
-      &d_result[idim.copy_at_depth(0,0,0,stream)],
+      &result[odim.copy_at_depth( 0, 0, 0, elevation )],
+      &d_result[idim.copy_at_depth( 0, 0, 0, stream )],
       odim.m_size * odim.copies * sizeof( float ),
       cudaMemcpyDeviceToHost,
       streams[stream] );
@@ -336,7 +336,7 @@ void send_results(Dimension4 odim) {
 
 void do_process(Dimension4 idim, Dimension4 odim) {
   cout << "Starting main loop..." << endl;
-  read_matrix( idim, current_sector, current_elevation );
+  read_matrix( idim, current_sector, current_elevation, current_stream );
   copy_matrix_to_device( idim, current_sector, current_elevation, current_stream );
   do {
     perform_stage_1( idim, current_stream );
@@ -347,7 +347,7 @@ void do_process(Dimension4 idim, Dimension4 odim) {
         prev_elevation = current_elevation,
         prev_stream = current_stream;
     advance();
-    read_matrix( idim, current_sector, current_elevation );
+    read_matrix( idim, current_sector, current_elevation, current_stream );
     copy_matrix_to_device( idim, current_sector, current_elevation, current_stream );
     copy_result_to_host( idim, odim, prev_sector, prev_elevation, prev_stream );
     send_results( odim );
@@ -385,8 +385,8 @@ int main(int argc, char **argv) {
     num_streams = num_streams < 1 ? 1 : num_streams;
   }
 
-  Dimension4 idim(n_samples,n_sweeps,3,num_streams);
-  Dimension4 odim(1,n_sweeps/2,2,n_elevations);
+  Dimension4 idim( n_samples, n_sweeps, 3, num_streams );
+  Dimension4 odim( 1, n_sweeps / 2, 2, n_elevations );
 
   setup_ports();
 

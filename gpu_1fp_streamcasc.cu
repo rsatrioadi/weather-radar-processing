@@ -387,6 +387,14 @@ int main(int argc, char **argv) {
     // Generate Hamming coefficients
     const float *hamming_coef = generate_hamming_coef(m, n);
 
+    for (int j=0; j<m; j++) {
+      for (int i=0; i<n; i++) {
+        cout << hamming_coef[i+j*n] << " ";
+      }
+      cout << endl;
+    }
+    exit(0);
+
     // Generate MA coefficients
     float *ma_coef = generate_ma_coef(ma_count);
     fftwf_complex *_fft_ma = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * n);
