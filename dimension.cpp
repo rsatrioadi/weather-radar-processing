@@ -1,7 +1,8 @@
 #include "dimension.h"
 
 Dimension3::Dimension3(int w, int h, int d):
-  width(w), height(h), depth(d) {
+  width(w), height(h), depth(d),
+  m_size(w*h), total_size(w*h*d) {
 
 }
 
@@ -10,7 +11,8 @@ int Dimension3::at_depth(int x, int y, int depth){
 }
 
 Dimension4::Dimension4(int w, int h, int c, int d):
-  width(w), height(h), copies(c), depth(d) {
+  width(w), height(h), copies(c), depth(d),
+  m_size(w*h), total_size(w*h*c*d) {
 
 }
 

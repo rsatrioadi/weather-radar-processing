@@ -3,14 +3,14 @@
 
 class Dimension3 {
   public:
-    const int width, height, depth;
+    const int width, height, depth, m_size, total_size;
     int at_depth(int x, int y, int depth);
     Dimension3(int w, int h, int d);
 };
 
 class Dimension4 {
   public:
-    const int width, height, copies, depth;
+    const int width, height, copies, depth, m_size, total_size;
     int copy_at_depth(int x, int y, int copy, int depth);
     Dimension4(int w, int h, int c, int d);
 };
