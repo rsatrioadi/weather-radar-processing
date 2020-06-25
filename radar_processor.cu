@@ -252,6 +252,7 @@ void RadarProcessor::advance() {
   if (current_sector == 0) {
     current_elevation = (current_elevation + 1) % n_elevations;
   }
+  current_stream = (current_stream + 1) % n_cuda_streams;
 }
 
 void RadarProcessor::copy_result_to_host(int sector, int elevation, int stream) {

@@ -30,7 +30,6 @@ int
     current_sample = 0,
     current_elevation = 0,
     current_stream = 0;
-const int o_types = 2;
 
 int
     hh_index_start,
@@ -47,7 +46,7 @@ cuFloatComplex *fft_ma;
 // device
 float *d_hamming;
 cuFloatComplex *d_iq;
-cuFloatComplex *d_sum;
+cuFloatComplex *d_tmp;
 float *d_result;
 
 // cufft
@@ -64,17 +63,133 @@ udpclient *zdb_client, *zdr_client;
 
 __constant__ cuFloatComplex d_ma[512];
 
-//__global__ void __apply_hamming(cuFloatComplex *a, float *b, int b_length, int offset) {
-//  const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//  float factor = b[idx % b_length];
-//  a[offset + idx] = make_cuFloatComplex( factor * cuCrealf( a[offset + idx] ),
-//                                         factor * cuCimagf( a[offset + idx] ));
-//}
-
-
 __global__ void __apply_hamming(cuFloatComplex *a, float *b, int offset) {
-  const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  a[offset + idx] = make_cuFloatComplex( b[idx] * cuCrealf( a[offset + idx] ), b[idx] * cuCimagf( a[offset + idx] ));
+  const unsigned int idx = threadIdx.x + blockIdx.x*blockDim.x;
+  a[offset + idx] = make_cuFloatComplex(
+      b[idx]*cuCrealf( a[offset + idx] ),
+      b[idx]*cuCimagf( a[offset + idx] ));
+}
+
+__global__ void __sum_v4(cuFloatComplex *in, cuFloatComplex *out, int offset) {
+  const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+  extern __shared__ cuFloatComplex sdata[];
+
+#pragma unroll
+  for (unsigned int d = 0; d < 2; d++) {
+    sdata[j + n*d] = make_cuFloatComplex(
+        in[offset + j + i*n + n*d].x,
+        in[offset + j + i*n + n*d].y );
+  }
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x/2; s > 0; s >>= 1) {
+    if (j < s) {
+#pragma unroll
+      for (unsigned int d = 0; d < 2; d++) {
+        sdata[j + n*d] = cuCaddf( sdata[j + n*d], sdata[j + n*d + s] );
+      }
+    }
+    __syncthreads();
+  }
+
+  if (j == 0) {
+#pragma unroll
+    for (unsigned int d = 0; d < 2; d++) {
+      out[i*n + n*d] = sdata[j + n*d];
+    }
+  }
+}
+
+__global__ void __avgconj(cuFloatComplex *inout, cuFloatComplex *sum, int offset) {
+  const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+  float avgx = sum[offset + i*n].x/n;
+  float avgy = sum[offset + i*n].y/n;
+  inout[offset + j + i*n] = make_cuFloatComplex( inout[offset + j + i*n].x - avgx,
+                                                 (inout[offset + j + i*n].y - avgy)*-1 );
+}
+
+__global__ void __conjugate(cuFloatComplex *a, int offset) {
+  const unsigned int idx = blockIdx.x*blockDim.x + threadIdx.x;
+  a[offset + idx].y *= -1;
+}
+
+__global__ void __shift(cuFloatComplex *inout, int n, int offset) {
+  const unsigned int i = blockIdx.x, j = threadIdx.x;
+
+  cuFloatComplex temp = inout[offset + j + i*n];
+  inout[offset + j + i*n] = inout[offset + (j + n/2) + i*n];
+  inout[offset + (j + n/2) + i*n] = temp;
+}
+
+__global__ void __clip_v2(cuFloatComplex *inout, int n, int offset) {
+  const unsigned int i = threadIdx.x, j = n - blockIdx.x - 1;
+  inout[offset + j + i*n] = make_cuFloatComplex( 0, 0 );
+}
+
+__global__ void __abssqr(cuFloatComplex *inout, int offset) {
+  const unsigned int idx = blockIdx.x*blockDim.x + threadIdx.x;
+
+  float real, imag;
+  real = cuCrealf( inout[offset + idx] );
+  imag = cuCimagf( inout[offset + idx] );
+  inout[offset + idx] = make_cuFloatComplex( real*real + imag*imag, 0 );
+}
+
+__global__ void __apply_ma(cuFloatComplex *inout, int offset) {
+  const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+  inout[offset + j + i*n] = cuCmulf( inout[offset + j + i*n], d_ma[j] );
+}
+
+__global__ void __scale_real(cuFloatComplex *inout, int offset) {
+  const unsigned int i = blockIdx.x, j = threadIdx.x, n = blockDim.x;
+
+  inout[offset + j + i*n] = make_cuFloatComplex( inout[offset + j + i*n].x/n, 0 );
+}
+
+__global__ void __sum_inplace_v4(cuFloatComplex *in, int offset) {
+  const unsigned int i = 2*blockIdx.x, j = threadIdx.x, n = blockDim.x;
+  extern __shared__ cuFloatComplex sdata[];
+
+#pragma unroll
+  for (unsigned int d = 0; d < 2; d++) {
+    sdata[j + n*d] = make_cuFloatComplex( in[offset + j + i*n + n*d].x, in[offset + j + i*n + n*d].y );
+  }
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x/2; s > 0; s >>= 1) {
+    if (j < s) {
+#pragma unroll
+      for (unsigned int d = 0; d < 2; d++) {
+        sdata[j + n*d] = cuCaddf( sdata[j + n*d], sdata[j + n*d + s] );
+      }
+    }
+    __syncthreads();
+  }
+
+  if (j == 0) {
+#pragma unroll
+    for (unsigned int d = 0; d < 2; d++) {
+      in[offset + (i*n + n*d)] = sdata[j + n*d];
+    }
+  }
+}
+
+__global__ void __calcresult_v2(
+    cuFloatComplex *iq,
+    float *out,
+    int n,
+    int offset_hh, int offset_vv, int offset_vh,
+    int result_offset) {
+
+  const unsigned int i = threadIdx.x;
+
+  float z = pow( i*k_range_resolution, 2.0 )*k_calibration*iq[offset_hh + i*n].x;
+  float zdb = 10*log10( z );
+  float zdr = 10*(log10( iq[offset_hh + i*n].x ) - log10( iq[offset_vv + i*n].x ));
+  out[result_offset + i*2 + 0] = zdb;
+  out[result_offset + i*2 + 1] = zdr;
 }
 
 
@@ -89,58 +204,57 @@ void generate_hamming_coefficients(int m, int n) {
   // Calculate normalization power on range cell
   float p_range = 0;
   for (int i = 0; i < m; i++) {
-    p_range = p_range + pow( 0.53836 - 0.46164 * cos( 2 * M_PI * (i) / (m - 1)), 2.0 );
+    p_range = p_range + pow( 0.53836 - 0.46164*cos( 2*M_PI*(i)/(m - 1)), 2.0 );
   }
-  p_range = p_range / m;
+  p_range = p_range/m;
 
   // Calculate normalization power on Doppler cell
   float p_doppler = 0;
   for (int j = 0; j < n; j++) {
-    p_doppler = p_doppler + pow( 0.53836 - 0.46164 * cos( 2 * M_PI * (j) / (n - 1)), 2.0 );
+    p_doppler = p_doppler + pow( 0.53836 - 0.46164*cos( 2*M_PI*(j)/(n - 1)), 2.0 );
   }
-  p_doppler = p_doppler / n;
+  p_doppler = p_doppler/n;
 
   // Constant since FFT is not normalized and the power is computed w.r.t. 50ohm
-  const float k_wind = -1 / (16383.5 * m * n * sqrt( 50 ));
-  const float c = k_wind / sqrt( p_range * p_doppler );
+  const float k_wind = -1/(16383.5*m*n*sqrt( 50 ));
+  const float c = k_wind/sqrt( p_range*p_doppler );
 
   // Generate elements
-  hamming_coef = new float[m * n];
+  hamming_coef = new float[m*n];
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < n; j++) {
-      hamming_coef[i * n + j] =
-          (0.53836 - 0.46164 * cos( 2 * M_PI * (i) / (m - 1))) * (0.53836 - 0.46164 * cos( 2 * M_PI * (j) / (n - 1))) *
-          c;
+      hamming_coef[j + i*n] =
+          (0.53836 - 0.46164*cos( 2*M_PI*(i)/(m - 1)))*(0.53836 - 0.46164*cos( 2*M_PI*(j)/(n - 1)))*c;
     }
   }
 }
 
-void generate_ma_coefficients(int n) {
+void generate_ma_coefficients(Dimension4 dim, int n) {
   cout << "Generating MA coefficients..." << endl;
   float *ma_coef = new float[n];
   float _sum = 0.0;
   for (int i = 0; i < n; i++) {
-    ma_coef[i] = exp( -(pow( i - ((n - 1) / 2), 2.0 )) / 2 );
+    ma_coef[i] = exp( -(pow( i - ((n - 1)/2), 2.0 ))/2 );
     _sum += ma_coef[i];
   }
   for (int i = 0; i < n; i++) {
-    ma_coef[i] = ma_coef[i] / _sum;
+    ma_coef[i] = ma_coef[i]/_sum;
   }
 
-  fftwf_complex *_fft_ma = (fftwf_complex *) fftwf_malloc( sizeof( fftwf_complex ) * n );
-  fftwf_plan fft_ma_plan = fftwf_plan_dft_1d( n, _fft_ma, _fft_ma, FFTW_FORWARD, FFTW_ESTIMATE );
+  fftwf_complex *_fft_ma = (fftwf_complex *) fftwf_malloc( sizeof( fftwf_complex )*dim.width );
+  fftwf_plan fft_ma_plan = fftwf_plan_dft_1d( dim.width, _fft_ma, _fft_ma, FFTW_FORWARD, FFTW_ESTIMATE );
   for (int j = 0; j < n; j++) {
     _fft_ma[j][0] = ma_coef[j];
     _fft_ma[j][1] = 0;
   }
-  for (int j = n; j < n; j++) {
+  for (int j = n; j < dim.width; j++) {
     _fft_ma[j][0] = 0;
     _fft_ma[j][1] = 0;
   }
   fftwf_execute( fft_ma_plan );
   fftwf_destroy_plan( fft_ma_plan );
-  fft_ma = new cuFloatComplex[n];
-  for (int j = 0; j < n; j++) {
+  fft_ma = new cuFloatComplex[dim.width];
+  for (int j = 0; j < dim.width; j++) {
     fft_ma[j] = make_cuFloatComplex( _fft_ma[j][0], _fft_ma[j][1] );
   }
   fftwf_free( _fft_ma );
@@ -149,30 +263,29 @@ void generate_ma_coefficients(int n) {
 void generate_constants(Dimension4 dim, int ma_count) {
   cout << "Generating constants..." << endl;
   generate_hamming_coefficients( dim.height, dim.width );
-  generate_ma_coefficients( ma_count );
+  generate_ma_coefficients( dim, ma_count );
 }
 
-void prepare_host_arys(Dimension4 idim, Dimension4 odim) {
+void prepare_host_arys(Dimension4 idim, Dimension4 sitdim) {
   cout << "Preparing host arrays..." << endl;
-  // 3 is for hh, vv, and vh
-  cudaMallocHost((void **) &p_iq, idim.total_size * sizeof( cuFloatComplex ));
-  result = new float[odim.total_size];
+  cudaMallocHost((void **) &p_iq, idim.total_size*sizeof( cuFloatComplex ));
+  result = new float[sitdim.total_size];
 }
 
 void prepare_device_arys(Dimension4 idim, Dimension4 odim) {
   cout << "Preparing device arrays..." << endl;
-  cudaMalloc( &d_hamming, idim.m_size * sizeof( float ));
-  cudaMalloc( &d_iq, idim.total_size * sizeof( cuFloatComplex ));
-  cudaMalloc( &d_sum, idim.total_size * sizeof( cuFloatComplex ));
-  cudaMalloc( &d_result, odim.total_size * sizeof( float ));
+  cudaMalloc( &d_hamming, idim.m_size*sizeof( float ));
+  cudaMalloc( &d_iq, idim.total_size*sizeof( cuFloatComplex ));
+  cudaMalloc( &d_tmp, idim.m_size*sizeof( cuFloatComplex ));
+  cudaMalloc( &d_result, odim.total_size*sizeof( float ));
 
-  cudaMemcpy( d_hamming, hamming_coef, idim.m_size * sizeof( float ), cudaMemcpyHostToDevice );
-  cudaMemcpyToSymbol( d_ma, fft_ma, idim.width * sizeof( cuFloatComplex ), 0, cudaMemcpyHostToDevice );
+  cudaMemcpy( d_hamming, hamming_coef, idim.m_size*sizeof( float ), cudaMemcpyHostToDevice );
+  cudaMemcpyToSymbol( d_ma, fft_ma, idim.width*sizeof( cuFloatComplex ), 0, cudaMemcpyHostToDevice );
 }
 
-void prepare_arys(Dimension4 idim, Dimension4 odim) {
+void prepare_arys(Dimension4 idim, Dimension4 odim, Dimension4 sitdim) {
   cout << "Preparing arrays:" << endl;
-  prepare_host_arys( idim, odim );
+  prepare_host_arys( idim, sitdim );
   prepare_device_arys( idim, odim );
 }
 
@@ -182,13 +295,14 @@ void initialize_streams(Dimension4 idim, Dimension4 odim) {
   fft_doppler_handle = new cufftHandle[idim.depth];
   fft_pdop_handle = new cufftHandle[idim.depth];
 
-  int rank = 1;                   // --- 1D FFTs
-  int nn[] = { idim.height };        // --- Size of the Fourier transform
-  int istride = idim.width, ostride = idim.width;   // --- Distance between two successive input/output elements
-  int idist = 1, odist = 1;       // --- Distance between batches
-  int inembed[] = { 0 };          // --- Input size with pitch (ignored for 1D transforms)
-  int onembed[] = { 0 };          // --- Output size with pitch (ignored for 1D transforms)
-  int batch = idim.width;          // --- Number of batched executions
+  int rank = 1;                 // --- 1D FFTs
+  int nn[] = { idim.height };   // --- Size of the Fourier transform
+  int istride = idim.width,     // --- Distance between two successive input/output elements
+  ostride = idim.width;
+  int idist = 1, odist = 1;     // --- Distance between batches
+  int inembed[] = { 0 };        // --- Input size with pitch (ignored for 1D transforms)
+  int onembed[] = { 0 };        // --- Output size with pitch (ignored for 1D transforms)
+  int batch = idim.width;       // --- Number of batched executions
 
   streams = new cudaStream_t[idim.depth];
   for (int i = 0; i < idim.depth; i++) {
@@ -198,7 +312,7 @@ void initialize_streams(Dimension4 idim, Dimension4 odim) {
                    inembed, istride, idist,
                    onembed, ostride, odist, CUFFT_C2C, batch );
     cufftPlan1d( &fft_doppler_handle[i], idim.width, CUFFT_C2C, idim.height );
-    cufftPlan1d( &fft_pdop_handle[i], idim.width, CUFFT_C2C, odim.height );
+    cufftPlan1d( &fft_pdop_handle[i], idim.width, CUFFT_C2C, idim.height/2 );
 
     cufftSetStream( fft_range_handle[i], streams[i] );
     cufftSetStream( fft_doppler_handle[i], streams[i] );
@@ -208,19 +322,16 @@ void initialize_streams(Dimension4 idim, Dimension4 odim) {
 
 void read_matrix(Dimension4 idim, int sector, int elevation, int stream) {
   cout << "Reading matrices from network..." << endl;
-  char *buff = new char[NUM_BYTES_PER_SAMPLE * idim.m_size];
+  char *buff = new char[NUM_BYTES_PER_SAMPLE*idim.m_size];
   for (int j = 0; j < idim.height; j++) {
-    server->recv( buff + j * (NUM_BYTES_PER_SAMPLE * idim.width), NUM_BYTES_PER_SAMPLE * idim.width );
+    server->recv( buff + j*(NUM_BYTES_PER_SAMPLE*idim.width), NUM_BYTES_PER_SAMPLE*idim.width );
   }
-  //cout << "done!" << endl;
-  // cout << sector_id << " received." << endl;
   Sector s( idim.height, idim.width );
   s.fromByteArray( buff );
   delete[] buff;
 
   int a, b;
 
-  // cout << "bikin matriks" << endl;
   int idx = 0;
 #pragma unroll
   for (int j = 0; j < idim.height; j++) {
@@ -235,25 +346,14 @@ void read_matrix(Dimension4 idim, int sector, int elevation, int stream) {
     }
   }
 
-  // for (int i=0; i<n_sweeps; i++) {
-  //   for (int j=0; j<n_samples; j++) {
-  //     cout << "(" << p_iq[hh_index_start+i*n_samples+j].x << "," << p_iq[hh_index_start+i*n_samples+j].y << ") ";
-  //   }
-  //   cout << endl;
-  // }
-  // for (int i=0; i<n_sweeps; i++) {
-  //   for (int j=0; j<n_samples; j++) {
-  //     cout << "(" << p_iq[vv_index_start+i*n_samples+j].x << "," << p_iq[vv_index_start+i*n_samples+j].y << ") ";
-  //   }
-  //   cout << endl;
-  // }
-  // for (int i=0; i<n_sweeps; i++) {
-  //   for (int j=0; j<n_samples; j++) {
-  //     cout << "(" << p_iq[vh_index_start+i*n_samples+j].x << "," << p_iq[vh_index_start+i*n_samples+j].y << ") ";
-  //   }
-  //   cout << endl;
-  // }
-  // exit(0);
+//  for (int j = 0; j < idim.height; j++) {
+//    for (int i = 0; i < idim.width; i++) {
+//      int idx = idim.copy_at_depth( i, j, 0, stream );
+//      cout << "(" << p_iq[idx].x << "," << p_iq[idx].y << ") ";
+//    }
+//    cout << endl;
+//  }
+//  exit( 0 );
 }
 
 void copy_matrix_to_device(Dimension4 idim, int sector, int elevation, int stream) {
@@ -261,43 +361,126 @@ void copy_matrix_to_device(Dimension4 idim, int sector, int elevation, int strea
   cudaMemcpyAsync(
       &d_iq[idim.copy_at_depth( 0, 0, 0, stream )],
       &p_iq[idim.copy_at_depth( 0, 0, 0, stream )],
-      idim.m_size * idim.copies * sizeof( cuFloatComplex ),
+      idim.m_size*idim.copies*sizeof( cuFloatComplex ),
       cudaMemcpyHostToDevice,
       streams[stream] );
 }
 
 void perform_stage_1(Dimension4 idim, int stream) {
   cout << "Performing Stage I..." << endl;
-  cout << "n_sweeps: " << idim.height << endl;
-  cout << "n_samples: " << idim.width << endl;
-  cout << "stream: " << stream << endl;
-  cout << "input_ary_size: " << idim.m_size << endl;
-  cout << "offset: " << idim.copy_at_depth( 0, 0, 0, stream ) << endl;
-  //__apply_hamming<<<idim.height,idim.width*idim.copies,0,streams[stream]>>>( d_iq, d_hamming, idim.m_size, idim.copy_at_depth(0,0,0,stream) );
-  __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming,
-                                                                    idim.copy_at_depth( 0, 0, 0, stream ));
+
+  int
+      offset_hh = idim.copy_at_depth( 0, 0, 0, stream ),
+      offset_vv = idim.copy_at_depth( 0, 0, 1, stream ),
+      offset_vh = idim.copy_at_depth( 0, 0, 2, stream );
+
+  // apply Hamming coefficients
+  __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming, offset_hh );
+  __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming, offset_vv );
+  __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming, offset_vh );
+
+  // FFT range profile
+  cufftExecC2C( fft_range_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
+  cufftExecC2C( fft_range_handle[stream], &d_iq[offset_vv], &d_iq[offset_vv], CUFFT_FORWARD );
+  cufftExecC2C( fft_range_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
+
+  // FFT+shift Doppler profile
+  __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp,
+                                                                                                 offset_hh );
+  __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_hh );
+  __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp,
+                                                                                                 offset_vv );
+  __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_vv );
+  __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp,
+                                                                                                 offset_vh );
+  __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_vh );
+
+  cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
+  cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_vv], &d_iq[offset_vv], CUFFT_FORWARD );
+  cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
+
+  __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
+  __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
+  __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
+
+  __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_hh );
+  __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_vv );
+  __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_vh );
+
+  __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_hh );
+  __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_vv );
+  __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_vh );
 }
 
 void perform_stage_2(Dimension4 idim, int stream) {
   cout << "Performing Stage II..." << endl;
 
+  int
+      offset_hh = idim.copy_at_depth( 0, 0, 0, stream ),
+      offset_vv = idim.copy_at_depth( 0, 0, 1, stream ),
+      offset_vh = idim.copy_at_depth( 0, 0, 2, stream );
+
+  // Get absolute value squared
+  __abssqr<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
+  __abssqr<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
+  __abssqr<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
+
+  // FFT PDOP
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vv], &d_iq[offset_vv], CUFFT_FORWARD );
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
+
+  // Apply MA coefficients
+  __apply_ma<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
+  __apply_ma<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
+  __apply_ma<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
+
+  // Inverse FFT
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_INVERSE );
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vv], &d_iq[offset_vv], CUFFT_INVERSE );
+  cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_INVERSE );
+
+  __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
+  __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
+  __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
+
+  // Sum
+  __sum_inplace_v4<<<idim.height/4, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq,
+                                                                                                         offset_hh );
+  __sum_inplace_v4<<<idim.height/4, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq,
+                                                                                                         offset_vv );
+  __sum_inplace_v4<<<idim.height/4, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq,
+                                                                                                         offset_vh );
 }
 
-void perform_stage_3(Dimension4 idim, Dimension4 odim, int stream) {
+void perform_stage_3(Dimension4 idim, Dimension4 odim, int sector, int elevation, int stream) {
   cout << "Performing Stage III..." << endl;
 
+  int
+      offset_hh = idim.copy_at_depth( 0, 0, 0, stream ),
+      offset_vv = idim.copy_at_depth( 0, 0, 1, stream ),
+      offset_vh = idim.copy_at_depth( 0, 0, 2, stream );
+
+  // Calculate ZdB, Zdr
+  __calcresult_v2<<<1, idim.height/2, 0, streams[stream]>>>(
+      d_iq,
+      d_result,
+      idim.width,
+      offset_hh, offset_vv, offset_vh,
+      odim.copy_at_depth( 0, 0, 0, stream ));
 }
 
-void advance() {
+void advance(Dimension4 idim) {
   cout << "Advancing to next sector..." << endl;
-  current_sector = (current_sector + 1) % n_sectors;
+  current_sector = (current_sector + 1)%n_sectors;
   if (current_sector == 0) {
-    current_elevation = (current_elevation + 1) % n_elevations;
+    current_elevation = (current_elevation + 1)%n_elevations;
   }
+  current_stream = (current_stream + 1)%idim.depth;
 }
 
-void copy_result_to_host(Dimension4 idim, Dimension4 odim, int sector, int elevation, int stream) {
-
+void copy_result_to_host(Dimension4 idim, Dimension4 odim, Dimension4 sitdim, int sector, int elevation, int stream) {
+/*
   cout << 1 << endl;
   cuFloatComplex *dump = new cuFloatComplex[idim.m_size];
   cout << 2 << endl;
@@ -309,48 +492,73 @@ void copy_result_to_host(Dimension4 idim, Dimension4 odim, int sector, int eleva
       streams[stream] );
   cout << 3 << endl;
 
-  for (int i = 0; i < idim.height; i++) {
-    for (int j = 0; j < idim.width; j++) {
-      int idx = idim.copy_at_depth( j, i, 0, 0 );
+  for (int j = 0; j < idim.height/2; j++) {
+    for (int i = 0; i < idim.width; i++) {
+      int idx = idim.copy_at_depth( i, j, 0, 0 );
       cout << "(" << dump[idx].x << "," << dump[idx].y << ") ";
     }
     cout << endl;
   }
   cout << 4 << endl;
   exit( 0 );
-
+*/
   cout << "Copying result to host..." << endl;
 
   cudaMemcpyAsync(
-      &result[odim.copy_at_depth( 0, 0, 0, elevation )],
-      &d_result[idim.copy_at_depth( 0, 0, 0, stream )],
-      odim.m_size * odim.copies * sizeof( float ),
+      &result[sitdim.copy_at_depth( 0, 0, sector, elevation )],
+      &d_result[odim.copy_at_depth( 0, 0, 0, stream )],
+      odim.m_size*sizeof( float ),
       cudaMemcpyDeviceToHost,
       streams[stream] );
+
+//  cout << "zdb:" << endl;
+//  for (int i=0; i<sitdim.height; i++) {
+//    cout << result[sitdim.copy_at_depth(0,i,sector,elevation)] << endl;
+//  }
+//  exit(0);
 }
 
-void send_results(Dimension4 odim) {
+void send_results(Dimension4 sitdim, int sector, int elevation) {
   cout << "Sending results to network..." << endl;
 
+  float *zdb = new float[sitdim.height];
+  float *zdr = new float[sitdim.height];
+
+  for (int i = 0; i < sitdim.height; i++) {
+    zdb[i] = result[sitdim.copy_at_depth( 0, i, sector, elevation )];
+    zdr[i] = result[sitdim.copy_at_depth( 1, i, sector, elevation )];
+  }
+
+  unsigned char *zdb_buff = new unsigned char[sizeof( float )*sitdim.height + 2]; // + 2 for sector id
+  unsigned char *zdr_buff = new unsigned char[sizeof( float )*sitdim.height + 2]; // + 2 for sector id
+  zdb_buff[0] = (sector >> 8) & 0xff;
+  zdb_buff[1] = (sector) & 0xff;
+  zdr_buff[0] = (sector >> 8) & 0xff;
+  zdr_buff[1] = (sector) & 0xff;
+  aftoab( zdb, sitdim.height, &zdb_buff[2] );
+  aftoab( zdr, sitdim.height, &zdr_buff[2] );
+
+  zdb_client->send((const char *) zdb_buff, sitdim.height*sizeof( float ) + 2 );
+  zdr_client->send((const char *) zdr_buff, sitdim.height*sizeof( float ) + 2 );
 }
 
-void do_process(Dimension4 idim, Dimension4 odim) {
+void do_process(Dimension4 idim, Dimension4 odim, Dimension4 sitdim) {
   cout << "Starting main loop..." << endl;
   read_matrix( idim, current_sector, current_elevation, current_stream );
   copy_matrix_to_device( idim, current_sector, current_elevation, current_stream );
   do {
     perform_stage_1( idim, current_stream );
     perform_stage_2( idim, current_stream );
-    perform_stage_3( idim, odim, current_stream );
+    perform_stage_3( idim, odim, current_sector, current_elevation, current_stream );
     int
         prev_sector = current_sector,
         prev_elevation = current_elevation,
         prev_stream = current_stream;
-    advance();
+    advance( idim );
     read_matrix( idim, current_sector, current_elevation, current_stream );
     copy_matrix_to_device( idim, current_sector, current_elevation, current_stream );
-    copy_result_to_host( idim, odim, prev_sector, prev_elevation, prev_stream );
-    send_results( odim );
+    copy_result_to_host( idim, odim, sitdim, prev_sector, prev_elevation, prev_stream );
+    send_results( sitdim, prev_sector, prev_elevation );
   } while (true);
 }
 
@@ -379,21 +587,22 @@ int main(int argc, char **argv) {
 
   ios_base::sync_with_stdio( false );
 
-  int num_streams = 1;
+  int num_streams = 2;
   if (argc > 1) {
     num_streams = atoi( argv[1] );
-    num_streams = num_streams < 1 ? 1 : num_streams;
+    num_streams = num_streams < 2 ? 2 : num_streams;
   }
 
   Dimension4 idim( n_samples, n_sweeps, 3, num_streams );
-  Dimension4 odim( 1, n_sweeps / 2, 2, n_elevations );
+  Dimension4 odim( 2, n_sweeps/2, 1, num_streams );
+  Dimension4 sitdim( 2, n_sweeps/2, n_sectors, n_elevations );
 
   setup_ports();
 
-  generate_constants( idim, 7 );
-  prepare_arys( idim, odim );
+  generate_constants( idim, ma_count );
+  prepare_arys( idim, odim, sitdim );
   initialize_streams( idim, odim );
-  do_process( idim, odim );
+  do_process( idim, odim, sitdim );
   destroy_streams();
   destroy_arrays();
 
