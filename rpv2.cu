@@ -6,15 +6,24 @@
 #include <cufft.h>
 #include <sys/time.h>
 #include <assert.h>
-#include "sector.h"
-#include "udpbroadcast.h"
 #include "floats.h"
 #include "dimension.h"
+
+#include <msgpack.hpp>
+#include "zhelpers.hpp"
 
 #define NUM_BYTES_PER_SAMPLE (3*2*2)
 
 using namespace std;
-using namespace udpbroadcast;
+
+struct sectormsg {
+  int id;
+  vector<int> 
+      i_hh, q_hh,
+      i_vv, q_vv,
+      i_vh, q_vh;
+  MSGPACK_DEFINE_MAP( id, i_hh, q_hh, i_vv, q_vv, i_vh, q_vh );
+};
 
 const int
     n_sectors = 143,
@@ -57,8 +66,9 @@ cufftHandle
 
 cudaStream_t *streams;
 
-udpserver *server;
-udpclient *zdb_client, *zdr_client;
+zmq::context_t context( 1 );
+zmq::socket_t subscriber( context, ZMQ_SUB );
+zmq::socket_t publisher( context, ZMQ_PUB );
 
 
 __constant__ cuFloatComplex d_ma[512];
@@ -194,9 +204,9 @@ __global__ void __calcresult_v2(
 
 
 void setup_ports() {
-  server = new udpserver( 19001 );
-  zdb_client = new udpclient( 19002 );
-  zdr_client = new udpclient( 19003 );
+  subscriber.connect( "tcp://localhost:5563" );
+  subscriber.setsockopt( ZMQ_SUBSCRIBE, "A", 1 );
+  publisher.bind( "tcp://*:5563" );
 }
 
 void generate_hamming_coefficients(int m, int n) {
@@ -322,15 +332,17 @@ void initialize_streams(Dimension4 idim, Dimension4 odim) {
 
 void read_matrix(Dimension4 idim, int sector, int elevation, int stream) {
   cout << "Reading matrices from network..." << endl;
-  char *buff = new char[NUM_BYTES_PER_SAMPLE*idim.m_size];
-  for (int j = 0; j < idim.height; j++) {
-    server->recv( buff + j*(NUM_BYTES_PER_SAMPLE*idim.width), NUM_BYTES_PER_SAMPLE*idim.width );
-  }
-  Sector s( idim.height, idim.width );
-  s.fromByteArray( buff );
-  delete[] buff;
+  
+  //  Read envelope with address
+  string address = s_recv( subscriber );
+  //  Read message contents
+  string str = s_recv( subscriber );
 
-  int a, b;
+  msgpack::object_handle oh = msgpack::unpack( str.data(), str.size() );
+  msgpack::object deserialized = oh.get();
+
+  sectormsg s;
+  deserialized.convert( s );
 
   int idx = 0;
 #pragma unroll
@@ -338,11 +350,10 @@ void read_matrix(Dimension4 idim, int sector, int elevation, int stream) {
 #pragma unroll
     for (int i = 0; i < idim.width; i++) {
       // cin >> a >> b;
-      a = idx++;
-      b = idx++;
-      p_iq[idim.copy_at_depth( i, j, 0, stream )] = make_cuFloatComplex( s.hh[a], s.hh[b] );
-      p_iq[idim.copy_at_depth( i, j, 1, stream )] = make_cuFloatComplex( s.vv[a], s.vv[b] );
-      p_iq[idim.copy_at_depth( i, j, 2, stream )] = make_cuFloatComplex( s.vh[a], s.vh[b] );
+      p_iq[idim.copy_at_depth( i, j, 0, stream )] = make_cuFloatComplex( s.i_hh[idx], s.q_hh[idx] );
+      p_iq[idim.copy_at_depth( i, j, 1, stream )] = make_cuFloatComplex( s.i_vv[idx], s.q_vv[idx] );
+      p_iq[idim.copy_at_depth( i, j, 2, stream )] = make_cuFloatComplex( s.i_vh[idx], s.q_vh[idx] );
+      idx++;
     }
   }
 
@@ -538,8 +549,8 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
   aftoab( zdb, sitdim.height, &zdb_buff[2] );
   aftoab( zdr, sitdim.height, &zdr_buff[2] );
 
-  zdb_client->send((const char *) zdb_buff, sitdim.height*sizeof( float ) + 2 );
-  zdr_client->send((const char *) zdr_buff, sitdim.height*sizeof( float ) + 2 );
+  // zdb_client->send((const char *) zdb_buff, sitdim.height*sizeof( float ) + 2 );
+  // zdr_client->send((const char *) zdr_buff, sitdim.height*sizeof( float ) + 2 );
 }
 
 void do_process(Dimension4 idim, Dimension4 odim, Dimension4 sitdim) {
