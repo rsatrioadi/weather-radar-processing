@@ -628,16 +628,20 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
     zdr[i] = result[sitdim.copy_at_depth( 1, i, sector, elevation )];
   }
 
-  int buff_size = sizeof( float )*sitdim.height + 2; // + 2 for sector id
+  int buff_size = sizeof( float )*sitdim.height + 4; // + 2 for sector id + 2 for elevation
   
   unsigned char *zdb_buff = new unsigned char[buff_size];
   unsigned char *zdr_buff = new unsigned char[buff_size];
   zdb_buff[0] = (sector >> 8) & 0xff;
   zdb_buff[1] = (sector) & 0xff;
+  zdb_buff[2] = (elevation >> 8) & 0xff;
+  zdb_buff[3] = (elevation) & 0xff;
   zdr_buff[0] = (sector >> 8) & 0xff;
   zdr_buff[1] = (sector) & 0xff;
-  aftoab( zdb, sitdim.height, &zdb_buff[2] );
-  aftoab( zdr, sitdim.height, &zdr_buff[2] );
+  zdr_buff[2] = (elevation >> 8) & 0xff;
+  zdr_buff[3] = (elevation) & 0xff;
+  aftoab( zdb, sitdim.height, &zdb_buff[4] );
+  aftoab( zdr, sitdim.height, &zdr_buff[4] );
 
   stringstream localStream;
 
@@ -649,17 +653,13 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
   s_send( publisher, (std::string) str_zdb );
   cout << " Done." << endl;
 
-  // zdb
+  // zdr
   localStream.rdbuf()->pubsetbuf( (char*) &zdr_buff[0], buff_size );
   std::string str_zdr( localStream.str() );
   cout << "Sector " << sector << ": sending Zdr " << str_zdr.size() << " chars...";
   s_sendmore( publisher, (std::string) "C" );
   s_send( publisher, (std::string) str_zdr );
   cout << " Done." << endl;
-
-
-  // zdb_client->send((const char *) zdb_buff, sitdim.height*sizeof( float ) + 2 );
-  // zdr_client->send((const char *) zdr_buff, sitdim.height*sizeof( float ) + 2 );
 }
 
 void do_process(Dimension4 idim, Dimension4 odim, Dimension4 sitdim) {
