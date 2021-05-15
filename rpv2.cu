@@ -208,8 +208,10 @@ __global__ void __calcresult_v2(
   float z = pow( i*k_range_resolution, 2.0 )*k_calibration*iq[offset_hh + i*n].x;
   float zdb = 10*log10( z );
   float zdr = 10*(log10( iq[offset_hh + i*n].x ) - log10( iq[offset_vv + i*n].x ));
+  float ldr = 10*(log10( iq[offset_vh + i*n].x ) - log10( iq[offset_hh + i*n].x ));
   out[result_offset + i*2 + 0] = zdb;
   out[result_offset + i*2 + 1] = zdr;
+  out[result_offset + i*2 + 2] = ldr;
 }
 
 
@@ -420,7 +422,7 @@ void perform_stage_1(Dimension4 idim, int stream) {
   __apply_hamming<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_hamming, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // FFT range profile
   cufftExecC2C( fft_range_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
@@ -428,66 +430,66 @@ void perform_stage_1(Dimension4 idim, int stream) {
   cufftExecC2C( fft_range_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // FFT+shift Doppler profile
   __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp, offset_hh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_hh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp, offset_vv );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_vv );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __sum_v4<<<idim.height/2, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq, d_tmp, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __avgconj<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, d_tmp, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
   cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_vv], &d_iq[offset_vv], CUFFT_FORWARD );
   cufftExecC2C( fft_doppler_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
   __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
   __conjugate<<<idim.height, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_hh );
   __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_vv );
   __shift<<<idim.height, idim.width/2, 0, streams[stream]>>>( d_iq, idim.width, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_hh );
   __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_vv );
   __clip_v2<<<2, idim.height, 0, streams[stream]>>>( d_iq, idim.width, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 }
 
 void perform_stage_2(Dimension4 idim, int stream) {
@@ -504,7 +506,7 @@ void perform_stage_2(Dimension4 idim, int stream) {
   __abssqr<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // FFT PDOP
   cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_FORWARD );
@@ -512,7 +514,7 @@ void perform_stage_2(Dimension4 idim, int stream) {
   cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_FORWARD );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // Apply MA coefficients
   __apply_ma<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
@@ -520,7 +522,7 @@ void perform_stage_2(Dimension4 idim, int stream) {
   __apply_ma<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // Inverse FFT
   cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_hh], &d_iq[offset_hh], CUFFT_INVERSE );
@@ -528,14 +530,14 @@ void perform_stage_2(Dimension4 idim, int stream) {
   cufftExecC2C( fft_pdop_handle[stream], &d_iq[offset_vh], &d_iq[offset_vh], CUFFT_INVERSE );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_hh );
   __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vv );
   __scale_real<<<idim.height/2, idim.width, 0, streams[stream]>>>( d_iq, offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 
   // Sum
   __sum_inplace_v4<<<idim.height/4, idim.width, 2*idim.width*sizeof(cuFloatComplex), streams[stream]>>>( d_iq,
@@ -546,7 +548,7 @@ void perform_stage_2(Dimension4 idim, int stream) {
                                                                                                          offset_vh );
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 }
 
 void perform_stage_3(Dimension4 idim, Dimension4 odim, int sector, int elevation, int stream) {
@@ -566,7 +568,7 @@ void perform_stage_3(Dimension4 idim, Dimension4 odim, int sector, int elevation
       odim.copy_at_depth( 0, 0, 0, stream ));
 
   gpuErrchk( cudaPeekAtLastError() );
-  gpuErrchk( cudaDeviceSynchronize() );
+  gpuErrchk( cudaStreamSynchronize( streams[stream] ) );
 }
 
 void advance(Dimension4 idim) {
@@ -622,26 +624,38 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
 
   float *zdb = new float[sitdim.height];
   float *zdr = new float[sitdim.height];
+  float *ldr = new float[sitdim.height];
 
   for (int i = 0; i < sitdim.height; i++) {
     zdb[i] = result[sitdim.copy_at_depth( 0, i, sector, elevation )];
     zdr[i] = result[sitdim.copy_at_depth( 1, i, sector, elevation )];
+    ldr[i] = result[sitdim.copy_at_depth( 2, i, sector, elevation )];
   }
 
-  int buff_size = sizeof( float )*sitdim.height + 4; // + 2 for sector id + 2 for elevation
+  int buff_size = sizeof( float )*sitdim.height + 2 /* for sector id */ + 2 /* for elevation */;
   
   unsigned char *zdb_buff = new unsigned char[buff_size];
   unsigned char *zdr_buff = new unsigned char[buff_size];
+  unsigned char *ldr_buff = new unsigned char[buff_size];
+
   zdb_buff[0] = (sector >> 8) & 0xff;
   zdb_buff[1] = (sector) & 0xff;
   zdb_buff[2] = (elevation >> 8) & 0xff;
   zdb_buff[3] = (elevation) & 0xff;
+
   zdr_buff[0] = (sector >> 8) & 0xff;
   zdr_buff[1] = (sector) & 0xff;
   zdr_buff[2] = (elevation >> 8) & 0xff;
   zdr_buff[3] = (elevation) & 0xff;
+
+  ldr_buff[0] = (sector >> 8) & 0xff;
+  ldr_buff[1] = (sector) & 0xff;
+  ldr_buff[2] = (elevation >> 8) & 0xff;
+  ldr_buff[3] = (elevation) & 0xff;
+
   aftoab( zdb, sitdim.height, &zdb_buff[4] );
   aftoab( zdr, sitdim.height, &zdr_buff[4] );
+  aftoab( ldr, sitdim.height, &zdr_buff[4] );
 
   stringstream localStream;
 
@@ -659,6 +673,14 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
   cout << "Sector " << sector << ": sending Zdr " << str_zdr.size() << " chars...";
   s_sendmore( publisher, (std::string) "C" );
   s_send( publisher, (std::string) str_zdr );
+  cout << " Done." << endl;
+
+  // ldr
+  localStream.rdbuf()->pubsetbuf( (char*) &ldr_buff[0], buff_size );
+  std::string str_ldr( localStream.str() );
+  cout << "Sector " << sector << ": sending ldr " << str_ldr.size() << " chars...";
+  s_sendmore( publisher, (std::string) "D" );
+  s_send( publisher, (std::string) str_ldr );
   cout << " Done." << endl;
 }
 
@@ -732,7 +754,7 @@ int main(int argc, char **argv) {
   }
 
   Dimension4 idim( n_samples, n_sweeps, 3, num_streams );
-  Dimension4 odim( 2, n_sweeps/2, 1, num_streams );
+  Dimension4 odim( 4, n_sweeps/2, 1, num_streams );
   Dimension4 sitdim( 2, n_sweeps/2, n_sectors, n_elevations );
 
   setup_ports();
