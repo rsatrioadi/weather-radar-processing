@@ -209,9 +209,9 @@ __global__ void __calcresult_v2(
   float zdb = 10*log10( z );
   float zdr = 10*(log10( iq[offset_hh + i*n].x ) - log10( iq[offset_vv + i*n].x ));
   float ldr = 10*(log10( iq[offset_vh + i*n].x ) - log10( iq[offset_hh + i*n].x ));
-  out[result_offset + i*2 + 0] = zdb;
-  out[result_offset + i*2 + 1] = zdr;
-  out[result_offset + i*2 + 2] = ldr;
+  out[result_offset + i*4 + 0] = zdb;
+  out[result_offset + i*4 + 1] = zdr;
+  out[result_offset + i*4 + 2] = ldr;
 }
 
 
@@ -280,6 +280,7 @@ void generate_ma_coefficients(Dimension4 dim, int n) {
     fft_ma[j] = make_cuFloatComplex( _fft_ma[j][0], _fft_ma[j][1] );
   }
   fftwf_free( _fft_ma );
+  delete[] ma_coef;
 }
 
 void generate_constants(Dimension4 dim, int ma_count) {
@@ -655,7 +656,7 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
 
   aftoab( zdb, sitdim.height, &zdb_buff[4] );
   aftoab( zdr, sitdim.height, &zdr_buff[4] );
-  aftoab( ldr, sitdim.height, &zdr_buff[4] );
+  aftoab( ldr, sitdim.height, &ldr_buff[4] );
 
   stringstream localStream;
 
@@ -682,6 +683,14 @@ void send_results(Dimension4 sitdim, int sector, int elevation) {
   s_sendmore( publisher, (std::string) "D" );
   s_send( publisher, (std::string) str_ldr );
   cout << " Done." << endl;
+
+  delete[] zdb_buff;
+  delete[] zdr_buff;
+  delete[] ldr_buff;
+
+  delete[] zdb;
+  delete[] zdr;
+  delete[] ldr;
 }
 
 void do_process(Dimension4 idim, Dimension4 odim, Dimension4 sitdim) {
@@ -721,6 +730,8 @@ void destroy_device_arys() {
   gpuErrchk( cudaFree( d_tmp ));
   gpuErrchk( cudaFree( d_result ));
 
+
+  delete[] streams;
 }
 
 void destroy_host_arys() {
@@ -755,7 +766,7 @@ int main(int argc, char **argv) {
 
   Dimension4 idim( n_samples, n_sweeps, 3, num_streams );
   Dimension4 odim( 4, n_sweeps/2, 1, num_streams );
-  Dimension4 sitdim( 2, n_sweeps/2, n_sectors, n_elevations );
+  Dimension4 sitdim( 4, n_sweeps/2, n_sectors, n_elevations );
 
   setup_ports();
 
